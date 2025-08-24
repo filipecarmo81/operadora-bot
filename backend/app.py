@@ -15,9 +15,14 @@ con = duckdb.connect(str(DB_PATH), read_only=True)
 # Helpers
 # ---------------------------------------------------------------------
 
-def _ultima_competencia_str() -> str:
+def _ultima_competencia_str() -> Optional[str]:
     """Retorna a última competência existente na tabela conta no formato YYYY-MM."""
     row = con.execute("SELECT strftime(max(dt_mes_competencia), '%Y-%m') FROM conta").fetchone()
+    return row[0] if row and row[0] else None
+
+def _min_competencia_str() -> Optional[str]:
+    """Retorna a menor competência existente na tabela conta no formato YYYY-MM."""
+    row = con.execute("SELECT strftime(min(dt_mes_competencia), '%Y-%m') FROM conta").fetchone()
     return row[0] if row and row[0] else None
 
 def _parse_competencia(competencia: Optional[str]) -> str:
@@ -326,3 +331,77 @@ def kpi_utilizacao_faixa(
     """
     rows = con.execute(sql, [dt, comp]).fetchdf()
     return {"competencia": comp, "faixas": rows.to_dict(orient="records")}
+
+# ---------------------------------------------------------------------
+# Utilização - evolução mês a mês
+# ---------------------------------------------------------------------
+
+@app.get("/kpi/utilizacao/evolucao", tags=["Utilização"])
+def kpi_utilizacao_evolucao(
+    desde: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$", description="YYYY-MM"),
+    ate:   Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$", description="YYYY-MM")
+):
+    # intervalos padrão: da menor à maior competência
+    minc = _min_competencia_str()
+    maxc = _ultima_competencia_str()
+    if not minc or not maxc:
+        raise HTTPException(404, "Sem dados de competência")
+
+    d = desde or minc
+    a = ate   or maxc
+
+    # validação do formato
+    for x in (d, a):
+        datetime.strptime(x + "-01", "%Y-%m-%d")
+
+    # total de ativos (snapshot atual)
+    (ativos_total,) = con.execute("""
+        SELECT COUNT(DISTINCT id_beneficiario)
+        FROM beneficiario
+        WHERE upper(ds_situacao) = 'ATIVO'
+    """).fetchone()
+    ativos_total = int(ativos_total or 0)
+
+    sql = """
+    WITH base AS (
+      SELECT
+        strftime(c.dt_mes_competencia, '%Y-%m') AS competencia,
+        c.id_conta,
+        c.id_beneficiario,
+        upper(c.ds_classificacao_item_n2) AS n2,
+        c.ds_tipo_internacao,
+        c.ds_carater_atendimento
+      FROM conta c
+      JOIN beneficiario b USING(id_beneficiario)
+      WHERE strftime(c.dt_mes_competencia, '%Y-%m') BETWEEN ? AND ?
+        AND upper(b.ds_situacao) = 'ATIVO'
+    )
+    SELECT
+      competencia,
+      COUNT(DISTINCT id_beneficiario)                              AS ativos_usaram,
+      SUM(CASE WHEN n2 = 'CONSULTAS' THEN 1 ELSE 0 END)            AS consultas,
+      COUNT(DISTINCT CASE WHEN ds_tipo_internacao IS NOT NULL
+                          THEN id_conta END)                        AS internacoes,
+      SUM(CASE WHEN n2 = 'MEDICINA LABORATORIAL' THEN 1 ELSE 0 END) AS exames_laboratoriais,
+      COUNT(DISTINCT CASE WHEN upper(coalesce(ds_carater_atendimento,'')) LIKE '%URG%'
+                          THEN id_conta END)                        AS urgencias
+    FROM base
+    GROUP BY competencia
+    ORDER BY competencia
+    """
+    df = con.execute(sql, [d, a]).fetchdf()
+    if df.empty:
+        return {"desde": d, "ate": a, "ativos_total": ativos_total, "serie": []}
+
+    # adiciona percentual de utilização
+    if ativos_total > 0:
+        df["percentual_utilizacao"] = df["ativos_usaram"] / ativos_total
+    else:
+        df["percentual_utilizacao"] = 0.0
+
+    return {
+        "desde": d,
+        "ate": a,
+        "ativos_total": ativos_total,
+        "serie": df.to_dict(orient="records"),
+    }
