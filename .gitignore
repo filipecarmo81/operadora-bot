@@ -1,0 +1,21 @@
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Config do editor
+.vscode/
+.idea/
+
+# Dados locais
+*.duckdb
+*.csv
+
+# Logs
+*.log
