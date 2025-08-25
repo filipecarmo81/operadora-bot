@@ -1,80 +1,93 @@
 # backend/load_data.py
 from pathlib import Path
-import duckdb
 import sys
+import duckdb
+import pandas as pd
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "operadora.duckdb"
 
-def load_csv_with_encodings(con, table: str, csv_path: Path) -> None:
+def load_with_duckdb(con: duckdb.DuckDBPyConnection, table: str, csv_path: Path) -> bool:
     """
-    Tenta carregar o CSV em UTF-8; se der erro de encoding, tenta LATIN1/CP1252.
-    Como último recurso, usa IGNORE_ERRORS=TRUE em LATIN1.
+    Tenta carregar usando DuckDB read_csv_auto (rápido).
+    Retorna True se deu certo, False se deu erro de unicode (ou erro qualquer).
     """
-    encoders = ["utf8", "latin1", "windows-1252"]
-    last_err = None
-
-    for enc in encoders:
-        try:
-            con.execute(f"DROP TABLE IF EXISTS {table}")
-            con.execute(
-                """
-                CREATE TABLE {table} AS
-                SELECT * FROM read_csv_auto(?, HEADER=TRUE, ENCODING=?, IGNORE_ERRORS=FALSE);
-                """.format(table=table),
-                [str(csv_path), enc],
-            )
-            (cnt,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-            print(f"[OK]   {table:<12}: {cnt} linhas (encoding={enc})")
-            return
-        except Exception as e:
-            last_err = e
-
-    # Último recurso: ignora linhas problemáticas em LATIN1
     try:
         con.execute(f"DROP TABLE IF EXISTS {table}")
+        # Sem ENCODING — DuckDB 1.0.0 não suporta. Mantemos HEADER e SAMPLE_SIZE.
         con.execute(
-            """
+            f"""
             CREATE TABLE {table} AS
-            SELECT * FROM read_csv_auto(?, HEADER=TRUE, ENCODING='latin1', IGNORE_ERRORS=TRUE);
-            """.format(table=table),
+            SELECT * FROM read_csv_auto(?, HEADER=TRUE, SAMPLE_SIZE=-1, IGNORE_ERRORS=FALSE);
+            """,
             [str(csv_path)],
         )
         (cnt,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-        print(f"[OK*] {table:<12}: {cnt} linhas (encoding=latin1, IGNORE_ERRORS=TRUE)")
+        print(f"[OK]   {table:<12}: {cnt} linhas (duckdb)")
+        return True
     except Exception as e:
-        print(f"[ERRO] {table}: {type(e).__name__}: {e}")
-        if last_err:
-            print(f"[TRACE] Último erro sem IGNORE_ERRORS: {last_err}")
+        # Qualquer erro aqui a gente trata como motivo p/ tentar Pandas
+        print(f"[INFO] DuckDB falhou para {table} ({csv_path.name}): {type(e).__name__}: {e}")
+        return False
+
+def load_with_pandas(con: duckdb.DuckDBPyConnection, table: str, csv_path: Path) -> None:
+    """
+    Fallback usando pandas.read_csv com tentativas de encoding.
+    """
+    tried = []
+    for enc in ["utf-8", "latin1", "cp1252"]:
+        try:
+            df = pd.read_csv(csv_path, encoding=enc, engine="python")
+            con.execute(f"DROP TABLE IF EXISTS {table}")
+            con.register("tmp_df", df)
+            con.execute(f"CREATE TABLE {table} AS SELECT * FROM tmp_df")
+            con.unregister("tmp_df")
+            (cnt,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            print(f"[OK]   {table:<12}: {cnt} linhas (pandas, encoding={enc})")
+            return
+        except Exception as e:
+            tried.append(f"{enc} -> {type(e).__name__}: {e}")
+
+    # Último recurso: substituir bytes inválidos
+    try:
+        df = pd.read_csv(csv_path, encoding="latin1", engine="python", errors="replace")
+        con.execute(f"DROP TABLE IF EXISTS {table}")
+        con.register("tmp_df", df)
+        con.execute(f"CREATE TABLE {table} AS SELECT * FROM tmp_df")
+        con.unregister("tmp_df")
+        (cnt,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        print(f"[OK*]  {table:<12}: {cnt} linhas (pandas, encoding=latin1, errors=replace)")
+    except Exception as e:
+        print(f"[ERRO] {table}: falha geral no fallback pandas: {type(e).__name__}: {e}")
+        print("[TRACE] Tentativas:", *tried, sep="\n  - ")
         raise
 
-def load_table(con, table: str, filename: str) -> None:
+def load_table(con: duckdb.DuckDBPyConnection, table: str, filename: str) -> None:
     csv_path = DATA_DIR / filename
     if not csv_path.exists():
         raise FileNotFoundError(f"Arquivo não encontrado: {csv_path}")
     print(f"[LOAD] {table:<12} <- {filename}")
-    load_csv_with_encodings(con, table, csv_path)
+
+    # 1) Tenta DuckDB direto (rápido)
+    ok = load_with_duckdb(con, table, csv_path)
+    if ok:
+        return
+
+    # 2) Fallback Pandas (encodings alternativos)
+    load_with_pandas(con, table, csv_path)
 
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Conecta/cria o banco
     con = duckdb.connect(str(DB_PATH))
-    # Opcional: paralelismo
     con.execute("PRAGMA threads=4;")
 
-    # Carrega cada tabela
+    # Carrega todas as tabelas necessárias
     load_table(con, "beneficiario", "beneficiario.csv")
     load_table(con, "conta",        "conta.csv")
     load_table(con, "mensalidade",  "mensalidade.csv")
     load_table(con, "prestador",    "prestador.csv")
     load_table(con, "autorizacao",  "autorizacao.csv")
-
-    # Dica: crie índices simples quando fizer sentido para acelerar consultas
-    # (DuckDB usa vectorized execution e costuma ser rápido mesmo sem índice)
-    # Exemplo:
-    # con.execute("CREATE INDEX IF NOT EXISTS idx_benef_cpf ON beneficiario(id_beneficiario)")
 
     con.close()
     print(f"[DONE] DuckDB atualizado em {DB_PATH}")
