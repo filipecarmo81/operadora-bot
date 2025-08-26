@@ -11,7 +11,7 @@ import pandas as pd
 # ======================================================================
 DB_PATH = str((Path(__file__).parent / "data" / "operadora.duckdb").resolve())
 
-app = FastAPI(title="Operadora KPIs", version="0.7.0")
+app = FastAPI(title="Operadora KPIs", version="0.8.0")
 
 # ======================================================================
 # CONEXÃO + UTILITÁRIOS
@@ -33,6 +33,13 @@ def get_cols(con, table: str) -> List[str]:
     rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
     return [r[1] for r in rows]
 
+def get_cols_types(con, table: str) -> List[Tuple[str, str]]:
+    if not table_exists(con, table):
+        raise HTTPException(status_code=400, detail=f"Tabela '{table}' não existe no DuckDB.")
+    rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+    # row: (cid, name, type, notnull, dflt_value, pk)
+    return [(r[1], (r[2] or "").upper()) for r in rows]
+
 def find_col(con, table: str, candidates: List[str]) -> Optional[str]:
     cols = set(c.lower() for c in get_cols(con, table))
     for cand in candidates:
@@ -48,11 +55,13 @@ def safe_json(data: Any) -> JSONResponse:
 # ======================================================================
 DATE_CANDIDATES = ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y%m%d", "%Y/%m/%d"]
 
-def month_expr(col_sql: str) -> str:
+def coalesced_date(col_sql: str) -> str:
     tries = [f"TRY_STRPTIME({col_sql}, '{fmt}')" for fmt in DATE_CANDIDATES]
     tries.append(f"CAST({col_sql} AS DATE)")
-    coalesced = "COALESCE(" + ", ".join(tries) + ")"
-    return f"strftime('%Y-%m', {coalesced})"
+    return "COALESCE(" + ", ".join(tries) + ")"
+
+def month_expr(col_sql: str) -> str:
+    return f"strftime('%Y-%m', {coalesced_date(col_sql)})"
 
 def numeric_expr(col_sql: str) -> str:
     sanitized = (
@@ -66,7 +75,7 @@ def numeric_expr(col_sql: str) -> str:
     )
 
 # ======================================================================
-# CANDIDATOS DE COLUNAS
+# CANDIDATOS DE COLUNAS (primeira tentativa)
 # ======================================================================
 CAND_DATA_CONTA = [
     "dt_competencia","competencia","mes_competencia","dt_emissao",
@@ -74,7 +83,7 @@ CAND_DATA_CONTA = [
 ]
 CAND_VALOR_CONTA = [
     "vl_pago","vl_liberado","vl_aprovado","vl_total","vl_custo",
-    "valor_pago","valor_liberado","valor_aprovado","valor_total","valor"
+    "valor_pago","valor_liberado","valor_aprovado","valor_total","valor","custo"
 ]
 CAND_DATA_MENS = [
     "dt_competencia","competencia","mes_competencia","dt_emissao",
@@ -93,14 +102,92 @@ CAND_ID_PREST_AUT = ["id_prestador"]  # em autorizacao
 CAND_ID_PREST_CONTA = ["id_prestador_pagamento","id_prestador","id_prestador_envio"]  # em conta
 CAND_NM_PREST = ["nm_prestador","ds_prestador","nome","razao_social"]
 
-# possíveis colunas/status p/ "ativos"
-CAND_STATUS_BENEF = [
-    "ds_situacao","situacao","status","st_beneficiario","fl_ativo","in_ativo","ativo"
-]
-
-# cidade/UF
+CAND_STATUS_BENEF = ["ds_situacao","situacao","status","st_beneficiario","fl_ativo","in_ativo","ativo"]
 CAND_CIDADE = ["cidade","nm_cidade","ds_cidade","municipio","cidade_beneficiario"]
 CAND_UF = ["uf","sg_uf","ds_uf","estado"]
+
+# ======================================================================
+# AUTO-DETECÇÃO DE COLUNAS (fallback)
+# ======================================================================
+DATE_NAME_HINTS = ["competenc", "dt_", "data", "emissao", "pagament", "liberac", "apresenta", "mes"]
+NUM_NAME_HINTS  = ["vl", "valor", "custo", "pago", "liberado", "aprov", "total", "fatur", "receita", "premio"]
+
+NUM_TYPES = {"DOUBLE", "DECIMAL", "NUMERIC", "INTEGER", "BIGINT", "SMALLINT", "FLOAT", "REAL"}
+DATE_TYPES = {"DATE", "TIMESTAMP", "DATETIME"}
+
+def _ratio_date_parse(con, table: str, col: str) -> float:
+    sql = f"""
+        SELECT
+          COUNT(*) AS c,
+          SUM(CASE WHEN {coalesced_date(col)} IS NOT NULL THEN 1 ELSE 0 END) AS ok
+        FROM (SELECT {col} FROM {table} WHERE {col} IS NOT NULL USING SAMPLE 10000 ROWS)
+    """
+    c, ok = con.execute(sql).fetchone()
+    return float(ok)/float(c) if c else 0.0
+
+def _ratio_num_parse(con, table: str, col: str) -> float:
+    sql = f"""
+        SELECT
+          COUNT(*) AS c,
+          SUM(CASE WHEN {numeric_expr(col)} IS NOT NULL AND {numeric_expr(col)} != 0 THEN 1 ELSE 0 END) AS ok
+        FROM (SELECT {col} FROM {table} WHERE {col} IS NOT NULL USING SAMPLE 10000 ROWS)
+    """
+    c, ok = con.execute(sql).fetchone()
+    return float(ok)/float(c) if c else 0.0
+
+def _name_boost(name: str, hints: List[str]) -> int:
+    n = name.lower()
+    score = 0
+    for h in hints:
+        if h in n: score += 1
+    # prefixo comum vale mais
+    if n.startswith("dt_") or n.startswith("vl_"): score += 1
+    return score
+
+def auto_detect_date_and_value(con, table: str) -> Tuple[Optional[str], Optional[str]]:
+    cols_types = get_cols_types(con, table)
+    if not cols_types:
+        return None, None
+
+    # 1) candidatos por tipo
+    date_typed = [c for c,t in cols_types if t in DATE_TYPES]
+    num_typed  = [c for c,t in cols_types if t in NUM_TYPES]
+
+    # 2) calcular “parse ratio” em amostra
+    date_scores = []
+    for c,_ in cols_types:
+        try:
+            r = _ratio_date_parse(con, table, c)
+            date_scores.append((c, r))
+        except Exception:
+            pass
+    num_scores = []
+    for c,_ in cols_types:
+        try:
+            r = _ratio_num_parse(con, table, c)
+            num_scores.append((c, r))
+        except Exception:
+            pass
+
+    # 3) decidir melhor coluna com múltiplos critérios
+    def pick_best(cands: List[Tuple[str, float]], typed_set: set, hints: List[str]) -> Optional[str]:
+        if not cands:
+            return None
+        ranked = []
+        for name, ratio in cands:
+            tboost = 1 if name in typed_set else 0
+            nboost = _name_boost(name, hints)
+            ranked.append((tboost, ratio, nboost, name))
+        ranked.sort(reverse=True)  # maior melhor
+        # exigir um mínimo de parse p/ evitar escolher lixo
+        if ranked[0][1] < 0.30 and ranked[0][0] == 0:  # 30% sem tipo
+            return None
+        return ranked[0][3]
+
+    date_col = pick_best(date_scores, set(date_typed), DATE_NAME_HINTS)
+    num_col  = pick_best(num_scores,  set(num_typed),  NUM_NAME_HINTS)
+
+    return date_col, num_col
 
 # ======================================================================
 # FUNÇÕES DE DESCOBERTA (SINISTRALIDADE)
@@ -109,15 +196,34 @@ def get_competencia_and_val_exprs(con) -> Tuple[str,str,str,str]:
     if not table_exists(con, "conta") or not table_exists(con, "mensalidade"):
         raise HTTPException(status_code=400, detail="Requer tabelas 'conta' e 'mensalidade'.")
 
+    # --- CONTA (data/valor)
     data_conta = find_col(con, "conta", CAND_DATA_CONTA)
     valor_conta = find_col(con, "conta", CAND_VALOR_CONTA)
     if not data_conta or not valor_conta:
-        raise HTTPException(status_code=400, detail="Não encontrei DATA/VALOR em 'conta' (ex.: dt_competencia, vl_liberado).")
+        # fallback automático
+        ad_date, ad_val = auto_detect_date_and_value(con, "conta")
+        data_conta = data_conta or ad_date
+        valor_conta = valor_conta or ad_val
+    if not data_conta or not valor_conta:
+        cols = get_cols(con, "conta")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Não encontrei DATA/VALOR em 'conta'. Colunas disponíveis: {cols}"
+        )
 
+    # --- MENSALIDADE (data/valor)
     data_mens = find_col(con, "mensalidade", CAND_DATA_MENS)
     valor_mens = find_col(con, "mensalidade", CAND_VALOR_MENS)
     if not data_mens or not valor_mens:
-        raise HTTPException(status_code=400, detail="Não encontrei DATA/VALOR em 'mensalidade' (ex.: dt_competencia, vl_faturado).")
+        ad_date, ad_val = auto_detect_date_and_value(con, "mensalidade")
+        data_mens = data_mens or ad_date
+        valor_mens = valor_mens or ad_val
+    if not data_mens or not valor_mens:
+        cols = get_cols(con, "mensalidade")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Não encontrei DATA/VALOR em 'mensalidade'. Colunas disponíveis: {cols}"
+        )
 
     mes_conta = month_expr(f"conta.{data_conta}")
     custo_expr = numeric_expr(f"conta.{valor_conta}")
@@ -153,9 +259,6 @@ def get_status_col(con) -> Optional[str]:
     return find_col(con, "beneficiario", CAND_STATUS_BENEF)
 
 def status_ativo_clause(col: str) -> str:
-    """
-    Tenta cobrir variações comuns de 'ativo'.
-    """
     return (
         "("
         f" upper({col}) LIKE '%ATIV%' "
@@ -219,7 +322,7 @@ def meta_meses(table: str = Query(...), col: str = Query(...), limit: int = Quer
     return {"table": table, "col": col, "meses": [r[0] for r in rows]}
 
 # ======================================================================
-# FILTROS DE BENEFICIÁRIO (usados em utilização)
+# FILTROS DE BENEFICIÁRIO
 # ======================================================================
 def add_benef_filters(con, table_alias: str, filtros: Dict[str, Optional[str]]) -> (List[str], List[Any]):
     wheres, binds = [], []
@@ -254,7 +357,7 @@ def add_benef_filters(con, table_alias: str, filtros: Dict[str, Optional[str]]) 
     return wheres, binds
 
 # ======================================================================
-# KPI: UTILIZAÇÃO (existentes)
+# KPI: UTILIZAÇÃO
 # ======================================================================
 @app.get("/kpi/utilizacao/resumo")
 def kpi_utilizacao_resumo(
@@ -389,7 +492,7 @@ def kpi_utilizacao_evolucao(
     return {"desde": desde, "ate": ate, "evolucao": out}
 
 # ======================================================================
-# KPI: PRESTADOR (existente + novo)
+# KPI: PRESTADOR
 # ======================================================================
 @app.get("/kpi/prestador/top")
 def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limite: int = 10):
@@ -434,7 +537,7 @@ def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limi
 @app.get("/kpi/prestador/impacto")
 def kpi_prestador_impacto(competencia: str = Query(..., description="YYYY-MM"), top: int = 10):
     """
-    Impacto = custo do prestador no mês. (Receita é global do plano; opcionalmente retornamos sinistralidade relativa = custo / receita_total_mensal)
+    Impacto = custo do prestador no mês.
     """
     con = get_con()
     if not table_exists(con, "conta"):
@@ -445,14 +548,12 @@ def kpi_prestador_impacto(competencia: str = Query(..., description="YYYY-MM"), 
     if not id_prest_conta:
         raise HTTPException(status_code=400, detail="Não encontrei coluna de prestador em 'conta' (ex.: id_prestador_pagamento).")
 
-    # receita total do mês (para referência/sinistralidade relativa)
     receita_total = con.execute(
         f"SELECT COALESCE(SUM({receita_expr}),0) FROM mensalidade WHERE {mes_mens} = ?",
         [competencia],
     ).fetchone()[0] or 0
 
-    # nome do prestador (opcional)
-    join_prest = ""; nome_col = None; id_prest_tab = None
+    join_prest = ""; nome_col = None
     if table_exists(con, "prestador"):
         id_prest_tab = find_col(con, "prestador", ["id_prestador","id_prest"])
         nome_col = find_col(con, "prestador", CAND_NM_PREST)
@@ -489,7 +590,7 @@ def kpi_prestador_impacto(competencia: str = Query(..., description="YYYY-MM"), 
     return {"competencia": competencia, "receita_total_mes": float(receita_total), "top": out}
 
 # ======================================================================
-# KPI: SINISTRALIDADE (existentes)
+# KPI: SINISTRALIDADE
 # ======================================================================
 @app.get("/kpi/sinistralidade/ultima")
 def kpi_sin_ultima():
@@ -805,10 +906,6 @@ def kpi_sin_por_cidade(competencia: str = Query(..., description="YYYY-MM"), top
 
 @app.get("/kpi/sinistralidade/ativos")
 def kpi_sin_ativos(competencia: str = Query(..., description="YYYY-MM")):
-    """
-    Sinistralidade considerando apenas beneficiários marcados como 'ativos'.
-    Detecta automaticamente a coluna de status; se não encontrar, retorna 400.
-    """
     con = get_con()
     mes_conta, custo_expr, mes_mens, receita_expr = get_competencia_and_val_exprs(con)
     keys = get_benef_keys(con)
