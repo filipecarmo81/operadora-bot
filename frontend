@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <title>Operadora KPIs - Playground</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    body { margin: 24px; background: #f6f7f9; color: #111; }
+    h1 { margin: 0 0 8px; }
+    .card { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input, select, button {
+      padding: 10px 12px; border-radius: 8px; border: 1px solid #d0d5dd; background: #fff;
+      font-size: 14px;
+    }
+    button { background: #111827; color: #fff; border: none; cursor: pointer; }
+    button:hover { background: #0b1220; }
+    pre {
+      white-space: pre-wrap; word-break: break-word; background: #0b1220; color: #E5E7EB;
+      padding: 12px; border-radius: 8px; font-size: 13px; max-height: 60vh; overflow: auto;
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+    .muted { color: #6b7280; font-size: 13px; }
+    .badge { background:#eef2ff; color:#3730a3; padding:2px 8px; border-radius:999px; font-size:12px; }
+  </style>
+</head>
+<body>
+  <h1>Operadora KPIs <span class="badge">Playground</span></h1>
+  <p class="muted">Use para testar seus endpoints do backend no Render.</p>
+
+  <div class="card">
+    <div class="row">
+      <label>Backend URL</label>
+      <input id="baseUrl" style="min-width:360px" value="https://operadora-bot.onrender.com" />
+      <label>Competência</label>
+      <input id="comp" placeholder="YYYY-MM" value="2025-06" />
+      <button id="btnPing">Health</button>
+    </div>
+    <div id="outHealth" class="muted" style="margin-top:8px;"></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Prestador - TOP (autorização)</h3>
+      <div class="row">
+        <input id="limitTop" type="number" min="1" value="10" />
+        <button id="btnTop">Executar</button>
+      </div>
+      <pre id="outTop"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Prestador - Impacto (custo no mês)</h3>
+      <div class="row">
+        <input id="limitImp" type="number" min="1" value="10" />
+        <button id="btnImp">Executar</button>
+      </div>
+      <pre id="outImp"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Utilização - Resumo</h3>
+      <div class="row">
+        <button id="btnUtil">Executar</button>
+      </div>
+      <pre id="outUtil"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Sinistralidade - Última competência</h3>
+      <div class="row">
+        <button id="btnSinUlt">Executar</button>
+      </div>
+      <pre id="outSinUlt"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Sinistralidade - Diferença (custo vs receita)</h3>
+      <div class="row">
+        <button id="btnSinDif">Executar</button>
+      </div>
+      <pre id="outSinDif"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Sinistralidade - Por produto</h3>
+      <div class="row">
+        <input id="limitProd" type="number" min="1" value="10" />
+        <button id="btnSinProd">Executar</button>
+      </div>
+      <pre id="outSinProd"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Sinistralidade - Por faixa etária</h3>
+      <div class="row">
+        <input id="binsFaixa" value="0-18,19-59,60+" />
+        <button id="btnSinFaixa">Executar</button>
+      </div>
+      <pre id="outSinFaixa"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Sinistralidade - Por cidade</h3>
+      <div class="row">
+        <input id="limitCidade" type="number" min="1" value="10" />
+        <button id="btnSinCid">Executar</button>
+      </div>
+      <pre id="outSinCid"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Sinistralidade - Somente ativos</h3>
+      <div class="row">
+        <button id="btnSinAtivos">Executar</button>
+      </div>
+      <pre id="outSinAtivos"></pre>
+    </div>
+  </div>
+
+  <script>
+    const q = id => document.getElementById(id);
+    const j = obj => JSON.stringify(obj, null, 2);
+
+    async function call(path) {
+      const base = q('baseUrl').value.replace(/\/+$/,'');
+      const url = base + path;
+      const res = await fetch(url, { method: 'GET' });
+      if (!res.ok) {
+        const txt = await res.text().catch(()=>String(res.status));
+        throw new Error(`HTTP ${res.status} - ${txt}`);
+      }
+      return res.json();
+    }
+
+    q('btnPing').onclick = async () => {
+      q('outHealth').textContent = '...';
+      try {
+        const d = await call('/health');
+        q('outHealth').textContent = 'OK • ' + d.db + ' • ' + JSON.stringify(d.tables);
+      } catch (e) {
+        q('outHealth').textContent = e.message;
+      }
+    };
+
+    q('btnTop').onclick = async () => {
+      q('outTop').textContent = '...';
+      const m = q('comp').value.trim();
+      const lim = q('limitTop').value || 10;
+      try {
+        const d = await call(`/kpi/prestador/top?competencia=${encodeURIComponent(m)}&limite=${lim}`);
+        q('outTop').textContent = j(d);
+      } catch (e) { q('outTop').textContent = e.message; }
+    };
+
+    q('btnImp').onclick = async () => {
+      q('outImp').textContent = '...';
+      const m = q('comp').value.trim();
+      const lim = q('limitImp').value || 10;
+      try {
+        const d = await call(`/kpi/prestador/impacto?competencia=${encodeURIComponent(m)}&top=${lim}`);
+        q('outImp').textContent = j(d);
+      } catch (e) { q('outImp').textContent = e.message; }
+    };
+
+    q('btnUtil').onclick = async () => {
+      q('outUtil').textContent = '...';
+      const m = q('comp').value.trim();
+      try {
+        const d = await call(`/kpi/utilizacao/resumo?competencia=${encodeURIComponent(m)}`);
+        q('outUtil').textContent = j(d);
+      } catch (e) { q('outUtil').textContent = e.message; }
+    };
+
+    q('btnSinUlt').onclick = async () => {
+      q('outSinUlt').textContent = '...';
+      try {
+        const d = await call(`/kpi/sinistralidade/ultima`);
+        q('outSinUlt').textContent = j(d);
+      } catch (e) { q('outSinUlt').textContent = e.message; }
+    };
+
+    q('btnSinDif').onclick = async () => {
+      q('outSinDif').textContent = '...';
+      const m = q('comp').value.trim();
+      try {
+        const d = await call(`/kpi/sinistralidade/diferenca?competencia=${encodeURIComponent(m)}`);
+        q('outSinDif').textContent = j(d);
+      } catch (e) { q('outSinDif').textContent = e.message; }
+    };
+
+    q('btnSinProd').onclick = async () => {
+      q('outSinProd').textContent = '...';
+      const m = q('comp').value.trim();
+      const lim = q('limitProd').value || 10;
+      try {
+        const d = await call(`/kpi/sinistralidade/por_produto?competencia=${encodeURIComponent(m)}&top=${lim}`);
+        q('outSinProd').textContent = j(d);
+      } catch (e) { q('outSinProd').textContent = e.message; }
+    };
+
+    q('btnSinFaixa').onclick = async () => {
+      q('outSinFaixa').textContent = '...';
+      const m = q('comp').value.trim();
+      const bins = encodeURIComponent(q('binsFaixa').value.trim());
+      try {
+        const d = await call(`/kpi/sinistralidade/por_faixa?competencia=${encodeURIComponent(m)}&bins=${bins}`);
+        q('outSinFaixa').textContent = j(d);
+      } catch (e) { q('outSinFaixa').textContent = e.message; }
+    };
+
+    q('btnSinCid').onclick = async () => {
+      q('outSinCid').textContent = '...';
+      const m = q('comp').value.trim();
+      const lim = q('limitCidade').value || 10;
+      try {
+        const d = await call(`/kpi/sinistralidade/por_cidade?competencia=${encodeURIComponent(m)}&top=${lim}`);
+        q('outSinCid').textContent = j(d);
+      } catch (e) { q('outSinCid').textContent = e.message; }
+    };
+
+    q('btnSinAtivos').onclick = async () => {
+      q('outSinAtivos').textContent = '...';
+      const m = q('comp').value.trim();
+      try {
+        const d = await call(`/kpi/sinistralidade/ativos?competencia=${encodeURIComponent(m)}`);
+        q('outSinAtivos').textContent = j(d);
+      } catch (e) { q('outSinAtivos').textContent = e.message; }
+    };
+  </script>
+</body>
+</html>
