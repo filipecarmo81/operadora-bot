@@ -294,6 +294,7 @@ def kpi_custo_por_faixa():
     if "dt_nascimento" not in get_cols("beneficiario"):
         raise HTTPException(status_code=500, detail="Coluna 'dt_nascimento' não encontrada em beneficiario")
 
+    # Placeholder simples (ajustaremos quando cruzarmos com 'conta')
     rows = con.execute(
         """
         WITH faixa AS (
@@ -304,21 +305,15 @@ def kpi_custo_por_faixa():
                     ELSE '60+'
                 END AS faixa
             FROM beneficiario
-        ),
-        custo AS (
-            SELECT '0-18' AS faixa, 0.0::DOUBLE AS custo UNION ALL
-            SELECT '19-59', 0.0::DOUBLE UNION ALL
-            SELECT '60+', 0.0::DOUBLE
         )
-        SELECT c.faixa, SUM(0.0) AS custo
-        FROM custo c
+        SELECT faixa, COUNT(*) AS qtd
+        FROM faixa
         GROUP BY 1
         ORDER BY 1
         """
     ).fetchall()
 
-    return [{"faixa": r[0], "custo": float(r[1] or 0)} for r in rows]
-
+    return [{"faixa": r[0], "qtd_beneficiarios": int(r[1] or 0)} for r in rows]
 
 # ---------------------------------------------------------------------
 # Utilização — com filtros e fallback para CONTA se AUTORIZACAO não existir
@@ -468,4 +463,17 @@ def kpi_utilizacao_evolucao(
                 "origem_filtros": filt_meta,
             }
         )
+    return out
+
+# ---------------------------------------------------------------------
+# Auditoria simples: schema detectado
+# ---------------------------------------------------------------------
+@app.get("/meta/schema", summary="Lista tabelas e colunas disponíveis (auditoria)")
+def meta_schema():
+    tables = con.execute(
+        "SELECT table_name FROM information_schema.tables ORDER BY 1"
+    ).fetchall()
+    out = []
+    for (tname,) in tables:
+        out.append({"tabela": tname, "colunas": get_cols(tname)})
     return out
