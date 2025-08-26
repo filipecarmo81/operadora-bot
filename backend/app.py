@@ -6,12 +6,17 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-# RESOLVE O CAMINHO DO BANCO RELATIVO A ESTE ARQUIVO
+# ======================================================================
+# CONFIG
+# ======================================================================
+# Caminho do banco relativo a este arquivo (funciona local e no Render)
 DB_PATH = str((Path(__file__).parent / "data" / "operadora.duckdb").resolve())
 
-app = FastAPI(title="Operadora KPIs", version="0.3.0")
+app = FastAPI(title="Operadora KPIs", version="0.4.0")
 
-# ---------------- Conexão ----------------
+# ======================================================================
+# CONEXÃO + UTILITÁRIOS
+# ======================================================================
 def get_con():
     try:
         con = duckdb.connect(DB_PATH, read_only=False)
@@ -19,7 +24,6 @@ def get_con():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao abrir DuckDB: {e}")
 
-# ---------------- Utilitários de esquema/erros ----------------
 def table_exists(con, name: str) -> bool:
     sql = "SELECT COUNT(*) FROM information_schema.tables WHERE lower(table_name)=lower(?)"
     return con.execute(sql, [name]).fetchone()[0] > 0
@@ -49,7 +53,9 @@ def require_cols(con, table: str, needed: List[str]) -> Dict[str, str]:
 def safe_json(data: Any) -> JSONResponse:
     return JSONResponse(content=data)
 
-# ---------------- Datas robustas ----------------
+# ======================================================================
+# EXPRESSÕES ROBUSTAS PARA DATAS E NÚMEROS
+# ======================================================================
 DATE_CANDIDATES = [
     "%Y-%m-%d",
     "%d/%m/%Y",
@@ -60,15 +66,35 @@ DATE_CANDIDATES = [
 
 def month_expr(col_sql: str) -> str:
     """
-    Retorna uma expressão SQL que extrai 'YYYY-MM' de uma coluna string/data,
-    tentando múltiplos formatos com TRY_STRPTIME, e por último tenta CAST.
+    Extrai 'YYYY-MM' de uma coluna de data/strings.
+    Tenta múltiplos formatos e por fim faz CAST para DATE.
     """
     tries = [f"TRY_STRPTIME({col_sql}, '{fmt}')" for fmt in DATE_CANDIDATES]
     tries.append(f"CAST({col_sql} AS DATE)")
     coalesced = "COALESCE(" + ", ".join(tries) + ")"
     return f"strftime('%Y-%m', {coalesced})"
 
-# ---------------- Diagnóstico ----------------
+def numeric_expr(col_sql: str) -> str:
+    """
+    Converte valores monetários em DOUBLE de forma robusta.
+    - Tenta CAST direto
+    - Depois remove 'R$', separador de milhar e troca vírgula por ponto
+    - Garante COALESCE para 0 quando não conseguir converter
+    """
+    # Remove 'R$' e espaços; remove pontos (milhar); troca vírgula por ponto
+    sanitized = (
+        f"REPLACE(REPLACE(REPLACE(REPLACE({col_sql}, 'R$', ''), ' ', ''), '.', ''), ',', '.')"
+    )
+    return (
+        "COALESCE("
+        f"TRY_CAST({col_sql} AS DOUBLE), "
+        f"TRY_CAST({sanitized} AS DOUBLE), "
+        "0)"
+    )
+
+# ======================================================================
+# META/DIAGNÓSTICO
+# ======================================================================
 @app.get("/health")
 def health():
     con = get_con()
@@ -108,10 +134,6 @@ def meta_meses(
     col: str = Query(..., description="Nome da coluna de data"),
     limit: int = Query(60, ge=1, le=240),
 ):
-    """
-    Lista os meses (YYYY-MM) encontrados na coluna informada, em ordem descrescente.
-    Use: /meta/meses?table=autorizacao&col=dt_autorizacao
-    """
     con = get_con()
     if not table_exists(con, table):
         raise HTTPException(status_code=400, detail=f"Tabela '{table}' não existe.")
@@ -129,7 +151,9 @@ def meta_meses(
     rows = con.execute(sql, [limit]).fetchall()
     return {"table": table, "col": col, "meses": [r[0] for r in rows]}
 
-# ---------------- Filtros de beneficiário ----------------
+# ======================================================================
+# FILTROS DE BENEFICIÁRIO
+# ======================================================================
 def add_benef_filters(con, table_alias: str, filtros: Dict[str, Optional[str]]) -> (List[str], List[Any]):
     wheres, binds = [], []
 
@@ -177,7 +201,9 @@ def add_benef_filters(con, table_alias: str, filtros: Dict[str, Optional[str]]) 
 
     return wheres, binds
 
-# ---------------- KPIs: Utilização ----------------
+# ======================================================================
+# KPI: UTILIZAÇÃO
+# ======================================================================
 @app.get("/kpi/utilizacao/resumo")
 def kpi_utilizacao_resumo(
     competencia: str = Query(..., description="YYYY-MM"),
@@ -334,7 +360,9 @@ def kpi_utilizacao_evolucao(
 
     return {"desde": desde, "ate": ate, "evolucao": out}
 
-# ---------------- Prestador (top) ----------------
+# ======================================================================
+# KPI: PRESTADOR (TOP)
+# ======================================================================
 @app.get("/kpi/prestador/top")
 def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limite: int = 10):
     con = get_con()
@@ -378,17 +406,170 @@ def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limi
             out.append({"id_prestador": r[0], "score": float(r[1])})
     return {"competencia": competencia, "top": out}
 
-# ---------------- Sinistralidade (placeholders) ----------------
+# ======================================================================
+# KPI: SINISTRALIDADE
+# ======================================================================
+
+# Candidatos para colunas (flexível a variações de nomes)
+CAND_DATA_CONTA = [
+    "dt_competencia", "competencia", "mes_competencia", "dt_emissao",
+    "dt_pagamento", "dt_apresentacao", "data", "dt_liberacao"
+]
+CAND_VALOR_CONTA = [
+    "vl_pago", "vl_liberado", "vl_aprovado", "vl_total", "vl_custo",
+    "valor_pago", "valor_liberado", "valor_aprovado", "valor_total", "valor"
+]
+CAND_DATA_MENS = [
+    "dt_competencia", "competencia", "mes_competencia", "dt_emissao",
+    "dt_pagamento", "data", "dt_referencia", "dt_vencimento"
+]
+CAND_VALOR_MENS = [
+    "vl_faturado", "vl_liquido", "vl_receita", "vl_total",
+    "valor_faturado", "valor_liquido", "valor_total", "valor", "receita"
+]
+
+def get_competencia_and_val_exprs(con):
+    """
+    Descobre (ou falha com 400) as colunas de competência e valor em conta/mensalidade
+    e retorna expressões (mes_conta, custo_expr, mes_mensalidade, receita_expr) prontas para usar.
+    """
+    if not table_exists(con, "conta") or not table_exists(con, "mensalidade"):
+        raise HTTPException(status_code=400, detail="Requer tabelas 'conta' e 'mensalidade'.")
+
+    # Conta (custo)
+    data_conta = find_col(con, "conta", CAND_DATA_CONTA)
+    if not data_conta:
+        raise HTTPException(status_code=400, detail="Não encontrei coluna de DATA em 'conta' (ex.: dt_competencia).")
+    valor_conta = find_col(con, "conta", CAND_VALOR_CONTA)
+    if not valor_conta:
+        raise HTTPException(status_code=400, detail="Não encontrei coluna de VALOR em 'conta' (ex.: vl_liberado/vl_pago).")
+
+    mes_conta = month_expr(f"conta.{data_conta}")
+    custo_expr = numeric_expr(f"conta.{valor_conta}")
+
+    # Mensalidade (receita)
+    data_mens = find_col(con, "mensalidade", CAND_DATA_MENS)
+    if not data_mens:
+        raise HTTPException(status_code=400, detail="Não encontrei coluna de DATA em 'mensalidade' (ex.: dt_competencia).")
+    valor_mens = find_col(con, "mensalidade", CAND_VALOR_MENS)
+    if not valor_mens:
+        raise HTTPException(status_code=400, detail="Não encontrei coluna de VALOR em 'mensalidade' (ex.: vl_faturado/vl_liquido).")
+
+    mes_mens = month_expr(f"mensalidade.{data_mens}")
+    receita_expr = numeric_expr(f"mensalidade.{valor_mens}")
+
+    return mes_conta, custo_expr, mes_mens, receita_expr
+
 @app.get("/kpi/sinistralidade/ultima")
 def kpi_sin_ultima():
+    """
+    Sinistralidade da competência mais recente disponível (full outer join de custos x receitas).
+    sinistralidade = custo / receita  (se receita == 0, retorna null e avisa)
+    """
     con = get_con()
-    if not table_exists(con, "conta") or not table_exists(con, "mensalidade"):
-        raise HTTPException(status_code=400, detail="Requer 'conta' e 'mensalidade' para sinistralidade.")
-    return {"detail": "Cálculo de sinistralidade será habilitado assim que confirmarmos as colunas de valores."}
+    mes_conta, custo_expr, mes_mens, receita_expr = get_competencia_and_val_exprs(con)
+
+    sql = f"""
+        WITH custos AS (
+            SELECT {mes_conta} AS mes, SUM({custo_expr}) AS custo
+            FROM conta
+            WHERE {mes_conta} IS NOT NULL
+            GROUP BY 1
+        ),
+        receitas AS (
+            SELECT {mes_mens} AS mes, SUM({receita_expr}) AS receita
+            FROM mensalidade
+            WHERE {mes_mens} IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT COALESCE(custos.mes, receitas.mes) AS mes,
+               COALESCE(custos.custo, 0) AS custo,
+               COALESCE(receitas.receita, 0) AS receita
+        FROM custos
+        FULL OUTER JOIN receitas USING (mes)
+        WHERE mes IS NOT NULL
+        ORDER BY mes DESC
+        LIMIT 1
+    """
+    row = con.execute(sql).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Não há dados suficientes para calcular sinistralidade.")
+    mes, custo, receita = row[0], float(row[1]), float(row[2])
+    sin = (custo / receita) if receita != 0 else None
+    return {
+        "competencia": mes,
+        "custo": custo,
+        "receita": receita,
+        "sinistralidade": sin,
+        "observacao": None if receita != 0 else "Receita igual a 0 nesta competência; sinistralidade indefinida."
+    }
 
 @app.get("/kpi/sinistralidade/media")
 def kpi_sin_media(meses: int = Query(6, ge=1, le=36)):
+    """
+    Média de sinistralidade nos últimos N meses.
+    -> Usa a forma agregada (sum(custos) / sum(receitas)) no período (mais estável).
+    Retorna também a lista mês a mês.
+    """
     con = get_con()
-    if not table_exists(con, "conta") or not table_exists(con, "mensalidade"):
-        raise HTTPException(status_code=400, detail="Requer 'conta' e 'mensalidade' para sinistralidade.")
-    return {"detail": "Cálculo de sinistralidade em construção — precisamos confirmar nomes das colunas de valores."}
+    mes_conta, custo_expr, mes_mens, receita_expr = get_competencia_and_val_exprs(con)
+
+    # Traz série mensal de custos e receitas, une, ordena desc e limita aos N mais recentes
+    series_sql = f"""
+        WITH custos AS (
+            SELECT {mes_conta} AS mes, SUM({custo_expr}) AS custo
+            FROM conta
+            WHERE {mes_conta} IS NOT NULL
+            GROUP BY 1
+        ),
+        receitas AS (
+            SELECT {mes_mens} AS mes, SUM({receita_expr}) AS receita
+            FROM mensalidade
+            WHERE {mes_mens} IS NOT NULL
+            GROUP BY 1
+        ),
+        joined AS (
+            SELECT COALESCE(c.mes, r.mes) AS mes,
+                   COALESCE(c.custo, 0) AS custo,
+                   COALESCE(r.receita, 0) AS receita
+            FROM custos c
+            FULL OUTER JOIN receitas r USING (mes)
+            WHERE COALESCE(c.mes, r.mes) IS NOT NULL
+        )
+        SELECT mes, custo, receita
+        FROM joined
+        ORDER BY mes DESC
+        LIMIT ?
+    """
+    rows = con.execute(series_sql, [meses]).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail="Sem dados para calcular a média de sinistralidade.")
+
+    # Calcula série e agregados
+    serie = []
+    total_custo = 0.0
+    total_receita = 0.0
+    for mes, custo, receita in rows:
+        custo = float(custo)
+        receita = float(receita)
+        total_custo += custo
+        total_receita += receita
+        sin = (custo / receita) if receita != 0 else None
+        serie.append({"competencia": mes, "custo": custo, "receita": receita, "sinistralidade": sin})
+
+    media_agregada = (total_custo / total_receita) if total_receita != 0 else None
+
+    return {
+        "meses_considerados": len(serie),
+        "media_sinistralidade_agregada": media_agregada,
+        "custo_total": total_custo,
+        "receita_total": total_receita,
+        "serie": list(reversed(serie))  # crescente no retorno (do mais antigo para o mais recente)
+    }
+
+# ======================================================================
+# PLACEHOLDERS QUE SERÃO EXPANDIDOS
+# ======================================================================
+@app.get("/kpi/sinistralidade/nota")
+def kpi_sin_nota():
+    return {"detail": "Endpoints adicionais (por produto, tendência, por faixa etária) podem ser habilitados após validarmos as colunas de produto e faixas."}
