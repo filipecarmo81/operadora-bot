@@ -1,4 +1,3 @@
-# backend/load_data.py
 from pathlib import Path
 import sys
 import duckdb
@@ -27,7 +26,6 @@ def load_with_duckdb(con: duckdb.DuckDBPyConnection, table: str, csv_path: Path)
         print(f"[OK]   {table:<12}: {cnt} linhas (duckdb)")
         return True
     except Exception as e:
-        # Qualquer erro aqui a gente trata como motivo p/ tentar Pandas
         print(f"[INFO] DuckDB falhou para {table} ({csv_path.name}): {type(e).__name__}: {e}")
         return False
 
@@ -48,7 +46,6 @@ def load_with_pandas(con: duckdb.DuckDBPyConnection, table: str, csv_path: Path)
             return
         except Exception as e:
             tried.append(f"{enc} -> {type(e).__name__}: {e}")
-
     # Último recurso: substituir bytes inválidos
     try:
         df = pd.read_csv(csv_path, encoding="latin1", engine="python", errors="replace")
