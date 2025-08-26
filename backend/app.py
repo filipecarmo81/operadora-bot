@@ -5,13 +5,23 @@ from datetime import datetime
 from pathlib import Path
 import duckdb
 import pandas as pd
+from fastapi.middleware.cors import CORSMiddleware  # <-- CORS
 
 # ======================================================================
 # CONFIG
 # ======================================================================
 DB_PATH = str((Path(__file__).parent / "data" / "operadora.duckdb").resolve())
 
-app = FastAPI(title="Operadora KPIs", version="0.8.0")
+app = FastAPI(title="Operadora KPIs", version="0.8.1")
+
+# Habilita CORS para poder chamar do navegador (GitHub Pages/arquivo local/etc.)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],       # se quiser, depois restrinja para seus domínios
+    allow_credentials=False,
+    allow_methods=["GET","HEAD","OPTIONS"],
+    allow_headers=["*"],
+)
 
 # ======================================================================
 # CONEXÃO + UTILITÁRIOS
@@ -37,7 +47,6 @@ def get_cols_types(con, table: str) -> List[Tuple[str, str]]:
     if not table_exists(con, table):
         raise HTTPException(status_code=400, detail=f"Tabela '{table}' não existe no DuckDB.")
     rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
-    # row: (cid, name, type, notnull, dflt_value, pk)
     return [(r[1], (r[2] or "").upper()) for r in rows]
 
 def find_col(con, table: str, candidates: List[str]) -> Optional[str]:
@@ -75,7 +84,7 @@ def numeric_expr(col_sql: str) -> str:
     )
 
 # ======================================================================
-# CANDIDATOS DE COLUNAS (primeira tentativa)
+# CANDIDATOS DE COLUNAS
 # ======================================================================
 CAND_DATA_CONTA = [
     "dt_competencia","competencia","mes_competencia","dt_emissao",
@@ -98,8 +107,8 @@ CAND_PRODUTO = [
 ]
 CAND_ID_BENEF = ["id_beneficiario","id_benef","id_pessoa","id_cliente"]
 CAND_DT_NASC = ["dt_nascimento","nascimento","data_nascimento"]
-CAND_ID_PREST_AUT = ["id_prestador"]  # em autorizacao
-CAND_ID_PREST_CONTA = ["id_prestador_pagamento","id_prestador","id_prestador_envio"]  # em conta
+CAND_ID_PREST_AUT = ["id_prestador"]
+CAND_ID_PREST_CONTA = ["id_prestador_pagamento","id_prestador","id_prestador_envio"]
 CAND_NM_PREST = ["nm_prestador","ds_prestador","nome","razao_social"]
 
 CAND_STATUS_BENEF = ["ds_situacao","situacao","status","st_beneficiario","fl_ativo","in_ativo","ativo"]
@@ -140,7 +149,6 @@ def _name_boost(name: str, hints: List[str]) -> int:
     score = 0
     for h in hints:
         if h in n: score += 1
-    # prefixo comum vale mais
     if n.startswith("dt_") or n.startswith("vl_"): score += 1
     return score
 
@@ -149,11 +157,9 @@ def auto_detect_date_and_value(con, table: str) -> Tuple[Optional[str], Optional
     if not cols_types:
         return None, None
 
-    # 1) candidatos por tipo
     date_typed = [c for c,t in cols_types if t in DATE_TYPES]
     num_typed  = [c for c,t in cols_types if t in NUM_TYPES]
 
-    # 2) calcular “parse ratio” em amostra
     date_scores = []
     for c,_ in cols_types:
         try:
@@ -169,7 +175,6 @@ def auto_detect_date_and_value(con, table: str) -> Tuple[Optional[str], Optional
         except Exception:
             pass
 
-    # 3) decidir melhor coluna com múltiplos critérios
     def pick_best(cands: List[Tuple[str, float]], typed_set: set, hints: List[str]) -> Optional[str]:
         if not cands:
             return None
@@ -178,9 +183,8 @@ def auto_detect_date_and_value(con, table: str) -> Tuple[Optional[str], Optional
             tboost = 1 if name in typed_set else 0
             nboost = _name_boost(name, hints)
             ranked.append((tboost, ratio, nboost, name))
-        ranked.sort(reverse=True)  # maior melhor
-        # exigir um mínimo de parse p/ evitar escolher lixo
-        if ranked[0][1] < 0.30 and ranked[0][0] == 0:  # 30% sem tipo
+        ranked.sort(reverse=True)
+        if ranked[0][1] < 0.30 and ranked[0][0] == 0:
             return None
         return ranked[0][3]
 
@@ -196,11 +200,9 @@ def get_competencia_and_val_exprs(con) -> Tuple[str,str,str,str]:
     if not table_exists(con, "conta") or not table_exists(con, "mensalidade"):
         raise HTTPException(status_code=400, detail="Requer tabelas 'conta' e 'mensalidade'.")
 
-    # --- CONTA (data/valor)
     data_conta = find_col(con, "conta", CAND_DATA_CONTA)
     valor_conta = find_col(con, "conta", CAND_VALOR_CONTA)
     if not data_conta or not valor_conta:
-        # fallback automático
         ad_date, ad_val = auto_detect_date_and_value(con, "conta")
         data_conta = data_conta or ad_date
         valor_conta = valor_conta or ad_val
@@ -211,7 +213,6 @@ def get_competencia_and_val_exprs(con) -> Tuple[str,str,str,str]:
             detail=f"Não encontrei DATA/VALOR em 'conta'. Colunas disponíveis: {cols}"
         )
 
-    # --- MENSALIDADE (data/valor)
     data_mens = find_col(con, "mensalidade", CAND_DATA_MENS)
     valor_mens = find_col(con, "mensalidade", CAND_VALOR_MENS)
     if not data_mens or not valor_mens:
@@ -383,7 +384,6 @@ def kpi_utilizacao_resumo(
     filtros = {"uf": uf, "cidade": cidade, "sexo": sexo, "faixa": faixa}
     where_b, binds_b = add_benef_filters(con, "b", filtros)
 
-    # Produto via conta (opcional)
     produto_where, produto_binds, join_conta = [], [], ""
     if produto and table_exists(con, "conta"):
         col_prod = find_col(con, "conta", CAND_PRODUTO)
@@ -410,7 +410,6 @@ def kpi_utilizacao_resumo(
         WHERE {where_sql}
     """
 
-    # base (sem mês)
     where_base = []
     binds_base: List[Any] = []
     if where_b:
@@ -536,9 +535,6 @@ def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limi
 
 @app.get("/kpi/prestador/impacto")
 def kpi_prestador_impacto(competencia: str = Query(..., description="YYYY-MM"), top: int = 10):
-    """
-    Impacto = custo do prestador no mês.
-    """
     con = get_con()
     if not table_exists(con, "conta"):
         raise HTTPException(status_code=400, detail="Tabela 'conta' não existe.")
@@ -865,7 +861,6 @@ def kpi_sin_por_faixa(competencia: str = Query(..., description="YYYY-MM"),
     itens.sort(key=lambda x: order.index(x["faixa"]) if x["faixa"] in order else 999)
     return {"competencia": competencia, "bins": [lbl for _,_,lbl in faixas], "itens": itens}
 
-# === NOVOS: por cidade e só ativos ===================================
 @app.get("/kpi/sinistralidade/por_cidade")
 def kpi_sin_por_cidade(competencia: str = Query(..., description="YYYY-MM"), top: int = 10):
     con = get_con()
