@@ -1,502 +1,376 @@
-from __future__ import annotations
-
-from fastapi import FastAPI, Query, HTTPException
-from typing import Optional, Tuple, List, Dict, Any
-from datetime import date
-from pathlib import Path
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
+from typing import Optional, List, Dict, Any
 import duckdb
+import pandas as pd
+from datetime import datetime
 
-APP_TITLE = "Operadora KPIs"
-APP_VERSION = "0.2.0"
+DB_PATH = "backend/data/operadora.duckdb"
 
-# ---------------------------------------------------------------------
-# Conexão DuckDB (somente leitura)
-# ---------------------------------------------------------------------
-DB_PATH = Path(__file__).parent / "data" / "operadora.duckdb"
-if not DB_PATH.exists():
-    raise RuntimeError(f"Base DuckDB não encontrada em {DB_PATH}")
-con = duckdb.connect(str(DB_PATH), read_only=True)
+app = FastAPI(title="Operadora KPIs", version="0.2.0")
 
-app = FastAPI(title=APP_TITLE, version=APP_VERSION)
-
-# ---------------------------------------------------------------------
-# Utilitários
-# ---------------------------------------------------------------------
-def month_bounds(competencia: str) -> Tuple[date, date]:
-    """Converte 'YYYY-MM' -> (primeiro_dia, primeiro_dia_mes_seguinte)."""
+# ------------ Conexão DuckDB ------------
+def get_con():
+    # conexão única e reutilizável
     try:
-        y, m = competencia.split("-")
-        y, m = int(y), int(m)
-        first = date(y, m, 1)
-        nxt = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
-        return first, nxt
-    except Exception:
-        raise HTTPException(status_code=422, detail="competencia deve estar no formato YYYY-MM")
+        con = duckdb.connect(DB_PATH, read_only=False)
+        return con
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao abrir DuckDB: {e}")
 
-def table_exists(table: str) -> bool:
-    row = con.execute(
-        "SELECT 1 FROM information_schema.tables WHERE lower(table_name)=lower(?) LIMIT 1",
-        [table],
-    ).fetchone()
-    return row is not None
+# ------------ Utilitários de esquema/erro ------------
+def table_exists(con, name: str) -> bool:
+    sql = "SELECT COUNT(*) FROM information_schema.tables WHERE lower(table_name)=lower(?)"
+    return con.execute(sql, [name]).fetchone()[0] > 0
 
-def get_cols(table: str) -> List[str]:
-    """Lista colunas da tabela (minúsculas). Se a tabela não existir, retorna []."""
-    if not table_exists(table):
-        return []
+def get_cols(con, table: str) -> List[str]:
+    if not table_exists(con, table):
+        raise HTTPException(status_code=400, detail=f"Tabela '{table}' não existe no DuckDB.")
     rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
-    # (cid, name, type, notnull, dflt_value, pk)
-    return [r[1].lower() for r in rows]
+    return [r[1] for r in rows]  # second field = column_name
 
-def find_col(table: str, candidates: List[str]) -> Optional[str]:
-    cols = set(get_cols(table))
-    for c in candidates:
-        if c in cols:
-            return c
+def find_col(con, table: str, candidates: List[str]) -> Optional[str]:
+    cols = set(c.lower() for c in get_cols(con, table))
+    for cand in candidates:
+        if cand.lower() in cols:
+            return cand
     return None
 
-def ts_expr(col: str, alias: Optional[str] = None) -> str:
+def require_cols(con, table: str, needed: List[str]) -> Dict[str, str]:
     """
-    Retorna uma expressão TIMESTAMP robusta para a coluna 'col' (do tipo texto ou data).
-    Tenta cast direto e vários formatos comuns (ISO e dd/mm/yyyy com/sem hora).
+    Retorna um mapeamento cand->col_name encontrado. Lança 400 se algum não existir.
     """
-    pref = f"{alias}." if alias else ""
-    c = f"{pref}{col}"
-    return (
-        "COALESCE("
-        f"try_cast({c} AS TIMESTAMP),"
-        f"try_strptime({c}, '%Y-%m-%d'),"
-        f"try_strptime({c}, '%Y-%m-%d %H:%M:%S'),"
-        f"try_strptime({c}, '%d/%m/%Y'),"
-        f"try_strptime({c}, '%d/%m/%Y %H:%M:%S'),"
-        f"try_strptime({c}, '%Y-%m-%dT%H:%M:%S')"
-        ")"
-    )
+    found = {}
+    for cand in needed:
+        col = find_col(con, table, [cand])
+        if not col:
+            raise HTTPException(status_code=400, detail=f"Coluna '{cand}' não encontrada em '{table}'.")
+        found[cand] = col
+    return found
 
-def comp_expr(table: str, alias: str) -> Optional[str]:
-    """
-    Expressão de competência 'YYYY-MM' para a tabela.
-    Se houver coluna 'competencia', usa ela; senão, deriva de uma coluna de data.
-    """
-    cols = set(get_cols(table))
-    if "competencia" in cols:
-        return f"strftime({alias}.competencia, '%Y-%m')"  # se já for string, strftime aceita; se data, idem
-    # tenta achar uma coluna de data
-    date_candidates = [
-        "dt_competencia", "data_competencia",
-        "dt_atendimento", "data_atendimento",
-        "dt_emissao", "dt_autorizacao", "data_autorizacao",
-        "dt_solicitacao", "data_solicitacao"
-    ]
-    col = find_col(table, date_candidates)
-    if not col:
-        return None
-    return f"strftime({ts_expr(col, alias)}, '%Y-%m')"
+def safe_json(data: Any) -> JSONResponse:
+    return JSONResponse(content=data)
 
-def faixa_case_expr(alias: str = "b") -> str:
-    """Expressão SQL para faixa etária 0-18 / 19-59 / 60+."""
-    if "dt_nascimento" not in get_cols("beneficiario"):
-        return ""  # sem coluna
-    return (
-        f"CASE "
-        f"WHEN timestampdiff('year', {alias}.dt_nascimento::timestamp, current_timestamp) <= 18 THEN '0-18' "
-        f"WHEN timestampdiff('year', {alias}.dt_nascimento::timestamp, current_timestamp) < 60 THEN '19-59' "
-        f"ELSE '60+' "
-        f"END"
-    )
-
-def active_where_for_beneficiario() -> Tuple[str, str]:
-    """
-    Retorna (where_sql, origem) para filtrar BENEFICIÁRIOS ATIVOS.
-    Detecta automaticamente a coluna.
-    """
-    col_str = find_col(
-        "beneficiario",
-        ["ds_situacao", "situacao", "st_situacao", "status", "cd_situacao", "ds_status"],
-    )
-    if col_str:
-        return f"upper({col_str}) in ('ATIVO','ATV','AT','A')", f"string:{col_str}"
-
-    col_flag = find_col(
-        "beneficiario",
-        ["fl_ativo", "in_ativo", "ic_ativo", "fg_ativo", "ativo"],
-    )
-    if col_flag:
-        where = (
-            f"({col_flag} in (1, TRUE) "
-            f"or upper(cast({col_flag} as varchar)) in ('S','SIM','TRUE','T','1'))"
-        )
-        return where, f"flag:{col_flag}"
-
-    return "1=1", "fallback_sem_coluna_de_situacao"
-
-def pick_usage_source() -> Tuple[str, List[str], List[str]]:
-    """
-    Decide a tabela-fonte de utilização:
-    - Se existir 'autorizacao', usa ela (preferível).
-    - Senão, usa 'conta'.
-    Retorna (table, candidates_data_cols, candidates_benef_cols).
-    """
-    if table_exists("autorizacao"):
-        return (
-            "autorizacao",
-            ["dt_autorizacao", "data_autorizacao", "dt_solicitacao", "data_solicitacao", "dt_atendimento", "data_atendimento"],
-            ["id_beneficiario", "cd_beneficiario", "nr_beneficiario", "id_matricula", "nr_matricula", "matricula"],
-        )
-    # fallback para CONTA
-    return (
-        "conta",
-        ["dt_atendimento", "data_atendimento", "dt_emissao", "dt_competencia", "data_competencia"],
-        [
-            "id_beneficiario", "cd_beneficiario", "nr_beneficiario",
-            "id_matricula", "nr_matricula", "matricula",
-            "id_beneficiario_pagamento", "beneficiario"
-        ],
-    )
-
-def build_beneficiary_filters(
-    produto: Optional[str],
-    uf: Optional[str],
-    cidade: Optional[str],
-    sexo: Optional[str],
-    faixa: Optional[str],
-    alias: str = "b",
-) -> Tuple[str, List[Any], Dict[str, Any]]:
-    """
-    Monta WHERE adicional para filtrar beneficiários por produto/uf/cidade/sexo/faixa.
-    Retorna (sql, params, meta_colunas_usadas).
-    """
-    clauses: List[str] = []
-    params: List[Any] = []
-    meta: Dict[str, Any] = {}
-
-    # produto
-    col_prod = find_col("beneficiario", ["id_produto", "cd_produto", "nm_produto", "produto", "id_plano", "cd_plano", "nm_plano"])
-    if produto:
-        if not col_prod:
-            raise HTTPException(status_code=500, detail="Filtro 'produto' solicitado mas não encontrei coluna equivalente em 'beneficiario'")
-        clauses.append(f"upper({alias}.{col_prod}) = upper(?)")
-        params.append(produto)
-        meta["col_produto"] = col_prod
-
-    # uf
-    col_uf = find_col("beneficiario", ["uf", "sg_uf", "ds_uf", "estado", "cd_uf"])
-    if uf:
-        if not col_uf:
-            raise HTTPException(status_code=500, detail="Filtro 'uf' solicitado mas não encontrei coluna equivalente em 'beneficiario'")
-        clauses.append(f"upper({alias}.{col_uf}) = upper(?)")
-        params.append(uf)
-        meta["col_uf"] = col_uf
-
-    # cidade
-    col_cidade = find_col("beneficiario", ["cidade", "nm_cidade", "ds_cidade", "municipio", "nm_municipio", "cd_municipio"])
-    if cidade:
-        if not col_cidade:
-            raise HTTPException(status_code=500, detail="Filtro 'cidade' solicitado mas não encontrei coluna equivalente em 'beneficiario'")
-        clauses.append(f"upper({alias}.{col_cidade}) = upper(?)")
-        params.append(cidade)
-        meta["col_cidade"] = col_cidade
-
-    # sexo
-    col_sexo = find_col("beneficiario", ["sexo", "ds_sexo", "cd_sexo", "genero", "ds_genero"])
-    if sexo:
-        if not col_sexo:
-            raise HTTPException(status_code=500, detail="Filtro 'sexo' solicitado mas não encontrei coluna equivalente em 'beneficiario'")
-        clauses.append(f"upper({alias}.{col_sexo}) = upper(?)")
-        params.append(sexo)
-        meta["col_sexo"] = col_sexo
-
-    # faixa (requer dt_nascimento)
-    if faixa:
-        expr = faixa_case_expr(alias)
-        if not expr:
-            raise HTTPException(status_code=500, detail="Filtro 'faixa' solicitado mas 'dt_nascimento' não existe em 'beneficiario'")
-        clauses.append(f"{expr} = ?")
-        params.append(faixa)
-        meta["faixa_expr"] = "CASE(dt_nascimento)"
-
-    sql = (" AND " + " AND ".join(clauses)) if clauses else ""
-    return sql, params, meta
-
-# ---------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------
-@app.get("/health", summary="Health")
+# ------------ Endpoints de diagnóstico ------------
+@app.get("/health")
 def health():
-    return {"ok": True}
+    con = get_con()
+    tables = ["beneficiario", "conta", "mensalidade", "prestador", "autorizacao"]
+    info = {}
+    for t in tables:
+        if table_exists(con, t):
+            try:
+                n = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            except Exception:
+                n = None
+            info[t] = {"exists": True, "rows": n}
+        else:
+            info[t] = {"exists": False, "rows": None}
+    return {"ok": True, "db": DB_PATH, "tables": info}
 
-# ---------- SINISTRALIDADE ----------
-@app.get("/kpi/sinistralidade/ultima", summary="Sinistralidade Ultima")
-def kpi_sinistralidade_ultima():
-    expr_c = comp_expr("conta", "c")
-    expr_m = comp_expr("mensalidade", "m")
-    if not expr_c:
-        raise HTTPException(status_code=500, detail="Não encontrei coluna de competência/data em 'conta'")
-    if not expr_m:
-        raise HTTPException(status_code=500, detail="Não encontrei coluna de competência/data em 'mensalidade'")
+@app.get("/meta/schema")
+def meta_schema():
+    con = get_con()
+    out = {}
+    for t in ["beneficiario", "conta", "mensalidade", "prestador", "autorizacao"]:
+        if table_exists(con, t):
+            out[t] = get_cols(con, t)
+    return out
 
-    row = con.execute(
-        f"""
-        WITH basec AS (
-            SELECT {expr_c} AS competencia, SUM(c.valor_aprovado) AS custo
-            FROM conta c
-            GROUP BY 1
-        ),
-        basem AS (
-            SELECT {expr_m} AS competencia, SUM(m.valor_faturado) AS receita
-            FROM mensalidade m
-            GROUP BY 1
-        ),
-        ult AS (
-            SELECT MAX(competencia) AS competencia FROM basec
-        )
-        SELECT
-            u.competencia,
-            COALESCE(c.custo, 0) AS custo,
-            COALESCE((SELECT receita FROM basem b WHERE b.competencia = u.competencia), 0) AS receita
-        FROM ult u
-        LEFT JOIN basec c USING(competencia)
-        """
-    ).fetchone()
+@app.get("/meta/sample")
+def meta_sample(table: str = Query(..., description="Nome da tabela"), limit: int = 5):
+    con = get_con()
+    if not table_exists(con, table):
+        raise HTTPException(status_code=400, detail=f"Tabela '{table}' não existe.")
+    df = con.execute(f"SELECT * FROM {table} LIMIT {limit}").df()
+    return {"table": table, "limit": limit, "rows": df.to_dict(orient="records")}
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Sem dados em conta/mensalidade")
+# ------------ Funções auxiliares KPI ------------
+def to_month(col: str) -> str:
+    # strftime para YYYY-MM
+    return f"strftime('%Y-%m', CAST({col} AS DATE))"
 
-    competencia, custo, receita = row
-    sinistralidade = float(custo) / float(receita) if receita and float(receita) != 0 else None
-    return {"competencia": competencia, "custo": float(custo or 0), "receita": float(receita or 0), "sinistralidade": sinistralidade}
+def add_benef_filters(con, table_alias: str, filtros: Dict[str, Optional[str]]) -> (List[str], List[Any]):
+    """
+    Constrói WHEREs contra a tabela 'beneficiario' (apelidada como table_alias).
+    Só aplica filtro se a coluna existir. Não lança erro por filtro ausente.
+    filtros: dict com possiveis chaves 'uf','cidade','sexo','faixa'
+    """
+    wheres, binds = [], []
 
-@app.get("/kpi/sinistralidade/media", summary="Sinistralidade Media")
-def kpi_sinistralidade_media(meses: int = Query(6, ge=1, le=36)):
-    expr_c = comp_expr("conta", "c")
-    expr_m = comp_expr("mensalidade", "m")
-    if not expr_c or not expr_m:
-        raise HTTPException(status_code=500, detail="Não encontrei coluna de competência/data em conta/mensalidade")
+    # UF
+    if filtros.get("uf"):
+        col = find_col(con, "beneficiario", ["uf", "sg_uf", "ds_uf", "estado"])
+        if col:
+            wheres.append(f"upper({table_alias}.{col}) = upper(?)")
+            binds.append(filtros["uf"])
 
-    rows = con.execute(
-        f"""
-        WITH basec AS (
-            SELECT {expr_c} AS competencia, SUM(c.valor_aprovado) AS custo
-            FROM conta c
-            GROUP BY 1
-        ),
-        basem AS (
-            SELECT {expr_m} AS competencia, SUM(m.valor_faturado) AS receita
-            FROM mensalidade m
-            GROUP BY 1
-        ),
-        base AS (
-            SELECT c.competencia, c.custo, COALESCE(b.receita, 0) AS receita
-            FROM basec c
-            LEFT JOIN basem b USING(competencia)
-        ),
-        ult AS (
-            SELECT competencia FROM base ORDER BY competencia DESC LIMIT ?
-        )
-        SELECT AVG(CASE WHEN b.receita <> 0 THEN b.custo/b.receita ELSE NULL END)
-        FROM base b
-        JOIN ult u USING(competencia)
-        """,
-        [meses],
-    ).fetchone()
-    media = float(rows[0]) if rows and rows[0] is not None else None
-    return {"meses": meses, "media_sinistralidade": media}
+    # Cidade
+    if filtros.get("cidade"):
+        col = find_col(con, "beneficiario", ["cidade", "nm_cidade", "ds_cidade"])
+        if col:
+            wheres.append(f"upper({table_alias}.{col}) = upper(?)")
+            binds.append(filtros["cidade"])
 
-# ---------- PRESTADOR TOP ----------
-@app.get("/kpi/prestador/top", summary="Prestador Top")
-def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limite: int = Query(5, ge=1, le=50)):
-    dt_ini, dt_fim = month_bounds(competencia)
-    col_data_conta = find_col("conta", ["dt_atendimento", "data_atendimento", "dt_emissao", "dt_competencia", "data_competencia", "competencia"])
-    if not col_data_conta:
-        raise HTTPException(status_code=500, detail="Não encontrei coluna de data em 'conta'")
+    # Sexo
+    if filtros.get("sexo"):
+        col = find_col(con, "beneficiario", ["sexo", "ds_sexo", "cd_sexo"])
+        if col:
+            wheres.append(f"upper({table_alias}.{col}) = upper(?)")
+            binds.append(filtros["sexo"])
 
-    rows = con.execute(
-        f"""
-        SELECT
-            c.id_prestador_pagamento AS id_prestador,
-            SUM(c.valor_aprovado)     AS custo
-        FROM conta c
-        WHERE {ts_expr(col_data_conta, 'c')} >= ? AND {ts_expr(col_data_conta, 'c')} < ?
-        GROUP BY 1
-        ORDER BY 2 DESC
-        LIMIT ?
-        """,
-        [dt_ini, dt_fim, limite],
-    ).fetchall()
-    return [{"id_prestador": r[0], "custo": float(r[1] or 0)} for r in rows]
+    # Faixa etária (ex: 0-18, 19-59, 60+). Tenta com dt_nascimento se existir
+    if filtros.get("faixa"):
+        faixa = filtros["faixa"].strip()
+        col_nasc = find_col(con, "beneficiario", ["dt_nascimento", "nascimento", "data_nascimento"])
+        if col_nasc:
+            if faixa.lower().endswith("+"):
+                try:
+                    idade_min = int(faixa[:-1])
+                    wheres.append(f"date_diff('year', CAST({table_alias}.{col_nasc} AS DATE), CURRENT_DATE) >= ?")
+                    binds.append(idade_min)
+                except:
+                    pass
+            else:
+                try:
+                    a, b = faixa.split("-")
+                    idade_min, idade_max = int(a), int(b)
+                    wheres.append(f"date_diff('year', CAST({table_alias}.{col_nasc} AS DATE), CURRENT_DATE) BETWEEN ? AND ?")
+                    binds += [idade_min, idade_max]
+                except:
+                    pass
 
-# ---------- CUSTO POR FAIXA ----------
-@app.get("/kpi/faixa/custo", summary="Custo Por Faixa")
-def kpi_custo_por_faixa():
-    if "dt_nascimento" not in get_cols("beneficiario"):
-        raise HTTPException(status_code=500, detail="Coluna 'dt_nascimento' não encontrada em beneficiario")
+    return wheres, binds
 
-    rows = con.execute(
-        """
-        WITH faixa AS (
-            SELECT
-                CASE
-                    WHEN timestampdiff('year', dt_nascimento::timestamp, current_timestamp) <= 18 THEN '0-18'
-                    WHEN timestampdiff('year', dt_nascimento::timestamp, current_timestamp) < 60 THEN '19-59'
-                    ELSE '60+'
-                END AS faixa
-            FROM beneficiario
-        )
-        SELECT faixa, COUNT(*) AS qtd
-        FROM faixa
-        GROUP BY 1
-        ORDER BY 1
-        """
-    ).fetchall()
-    return [{"faixa": r[0], "qtd_beneficiarios": int(r[1] or 0)} for r in rows]
-
-# ---------- UTILIZAÇÃO ----------
-@app.get("/kpi/utilizacao/resumo", summary="Resumo de utilização na competência")
+# ------------ KPIs de Utilização ------------
+@app.get("/kpi/utilizacao/resumo")
 def kpi_utilizacao_resumo(
     competencia: str = Query(..., description="YYYY-MM"),
-    produto: Optional[str] = Query(None, description="Código ou nome do produto"),
-    uf: Optional[str] = Query(None, description="UF, ex.: SP"),
-    cidade: Optional[str] = Query(None, description="Cidade, ex.: São Paulo"),
-    sexo: Optional[str] = Query(None, description="M/F ou equivalente"),
-    faixa: Optional[str] = Query(None, description="faixas: 0-18, 19-59, 60+"),
-):
-    dt_ini, dt_fim = month_bounds(competencia)
-
-    # 1) Critério de ATIVOS
-    where_ativos, origem_ativo = active_where_for_beneficiario()
-
-    # 2) Filtros opcionais (beneficiario)
-    filt_sql, filt_params, filt_meta = build_beneficiary_filters(produto, uf, cidade, sexo, faixa, alias="b")
-
-    # 3) Fonte de utilização
-    src_table, date_candidates, ben_candidates = pick_usage_source()
-    col_dt = find_col(src_table, date_candidates)
-    if not col_dt:
-        raise HTTPException(status_code=500, detail=f"Não encontrei coluna de data em '{src_table}'")
-    col_ben_src = find_col(src_table, ben_candidates)
-    col_ben_ben = find_col("beneficiario", ["id_beneficiario", "cd_beneficiario", "nr_beneficiario", "id_matricula", "nr_matricula", "matricula"])
-    if not col_ben_src or not col_ben_ben:
-        raise HTTPException(status_code=500, detail=f"Não encontrei chave de beneficiário para relacionar {src_table}↔beneficiario")
-
-    # 4) Contar ATIVOS (com filtros)
-    (ativos_total,) = con.execute(
-        f"""
-        SELECT COUNT(*)
-        FROM beneficiario b
-        WHERE {where_ativos} {filt_sql}
-        """,
-        filt_params,
-    ).fetchone()
-
-    # 5) Contar UTILIZARAM (com filtros)
-    params = [dt_ini, dt_fim] + filt_params
-    (utilizaram_total,) = con.execute(
-        f"""
-        WITH a AS (
-            SELECT DISTINCT {col_ben_src} AS ben
-            FROM {src_table} a
-            WHERE {ts_expr(col_dt, 'a')} >= ? AND {ts_expr(col_dt, 'a')} < ?
-        )
-        SELECT COUNT(*)
-        FROM a
-        JOIN beneficiario b ON b.{col_ben_ben} = a.ben
-        WHERE {where_ativos} {filt_sql}
-        """,
-        params,
-    ).fetchone()
-
-    perc = (float(utilizaram_total) / float(ativos_total)) if ativos_total else None
-    return {
-        "fonte_utilizacao": src_table,
-        "competencia": competencia,
-        "beneficiarios_ativos": int(ativos_total or 0),
-        "beneficiarios_utilizaram": int(utilizaram_total or 0),
-        "percentual_utilizacao": perc,
-        "origem_criterio_ativo": origem_ativo,
-        "origem_filtros": filt_meta,
-    }
-
-@app.get("/kpi/utilizacao/evolucao", summary="Evolução mensal da utilização")
-def kpi_utilizacao_evolucao(
-    desde: str = Query(..., description="YYYY-MM"),
-    ate:   str = Query(..., description="YYYY-MM"),
     produto: Optional[str] = Query(None),
     uf: Optional[str] = Query(None),
     cidade: Optional[str] = Query(None),
     sexo: Optional[str] = Query(None),
-    faixa: Optional[str] = Query(None, description="0-18, 19-59, 60+"),
+    faixa: Optional[str] = Query(None),
 ):
-    dt_ini, _ = month_bounds(desde)
-    _, dt_fim = month_bounds(ate)
+    """
+    Retorna:
+      - beneficiarios_base (distinct em beneficiario)
+      - beneficiarios_utilizados (distinct em autorizacao no mês)
+      - autorizacoes (linhas em autorizacao no mês)
+    Filtros de beneficiário (uf/cidade/sexo/faixa) só aplicam se a coluna existir.
+    """
+    con = get_con()
 
-    src_table, date_candidates, ben_candidates = pick_usage_source()
-    col_dt = find_col(src_table, date_candidates)
-    if not col_dt:
-        raise HTTPException(status_code=500, detail=f"Não encontrei coluna de data em '{src_table}'")
+    # Garantir tabelas e colunas essenciais
+    if not table_exists(con, "autorizacao"):
+        raise HTTPException(status_code=400, detail="Tabela 'autorizacao' não existe no banco.")
+    if not table_exists(con, "beneficiario"):
+        raise HTTPException(status_code=400, detail="Tabela 'beneficiario' não existe no banco.")
 
-    col_ben_src = find_col(src_table, ben_candidates)
-    col_ben_ben = find_col("beneficiario", ["id_beneficiario", "cd_beneficiario", "nr_beneficiario", "id_matricula", "nr_matricula", "matricula"])
-    if not col_ben_src or not col_ben_ben:
-        raise HTTPException(status_code=500, detail=f"Não encontrei chave de beneficiário para relacionar {src_table}↔beneficiario")
+    # Colunas chaves
+    id_benef_aut = find_col(con, "autorizacao", ["id_beneficiario"])
+    dt_aut = find_col(con, "autorizacao", ["dt_autorizacao"])
+    if not id_benef_aut or not dt_aut:
+        raise HTTPException(status_code=400, detail="Colunas essenciais ausentes em 'autorizacao' (precisa 'id_beneficiario' e 'dt_autorizacao').")
 
-    where_ativos, origem_ativo = active_where_for_beneficiario()
-    filt_sql, filt_params, filt_meta = build_beneficiary_filters(produto, uf, cidade, sexo, faixa, alias="b")
+    id_benef_ben = find_col(con, "beneficiario", ["id_beneficiario", "id_benef"])
+    if not id_benef_ben:
+        raise HTTPException(status_code=400, detail="Coluna de chave do beneficiário ausente em 'beneficiario' (tente 'id_beneficiario').")
 
-    rows = con.execute(
-        f"""
-        WITH meses AS (
-            SELECT strftime({ts_expr(col_dt)}, '%Y-%m') AS competencia
-            FROM {src_table}
-            WHERE {ts_expr(col_dt)} >= ? AND {ts_expr(col_dt)} < ?
-            GROUP BY 1
-            ORDER BY 1
-        ),
-        ativos AS (
-            SELECT COUNT(*) AS qtd
-            FROM beneficiario b
-            WHERE {where_ativos} {filt_sql}
-        )
-        SELECT
-            m.competencia,
-            (SELECT qtd FROM ativos) AS ativos,
-            (
-                SELECT COUNT(*)
-                FROM (
-                    SELECT DISTINCT a.{col_ben_src} AS ben
-                    FROM {src_table} a
-                    WHERE strftime({ts_expr(col_dt, 'a')}, '%Y-%m') = m.competencia
-                ) x
-                JOIN beneficiario b ON b.{col_ben_ben} = x.ben
-                WHERE {where_ativos} {filt_sql}
-            ) AS utilizaram
-        FROM meses m
-        ORDER BY m.competencia
-        """,
-        [dt_ini, dt_fim] + filt_params,
-    ).fetchall()
+    # WHEREs opcionais (beneficiário)
+    filtros = {"uf": uf, "cidade": cidade, "sexo": sexo, "faixa": faixa}
+    where_b, binds_b = add_benef_filters(con, "b", filtros)
 
+    # Produto: tentamos aplicar via tabela 'conta' (produto por beneficiário), se existir
+    produto_where, produto_binds, join_conta = [], [], ""
+    if produto and table_exists(con, "conta"):
+        # tentamos achar coluna de produto na conta
+        col_prod = find_col(con, "conta", ["produto", "ds_produto", "cd_produto", "nome_produto"])
+        col_benef_conta = find_col(con, "conta", ["id_beneficiario", "id_benef"])
+        if col_prod and col_benef_conta:
+            join_conta = f" LEFT JOIN conta c ON c.{col_benef_conta} = b.{id_benef_ben} "
+            produto_where.append(f"upper(c.{col_prod}) = upper(?)")
+            produto_binds.append(produto)
+
+    # Monta WHERE principal
+    mes_expr = to_month(f"a.{dt_aut}")
+    wheres = [f"{mes_expr} = ?"]
+    binds: List[Any] = [competencia]
+
+    if where_b:
+        wheres += where_b
+        binds += binds_b
+
+    if produto_where:
+        wheres += produto_where
+        binds += produto_binds
+
+    where_sql = " AND ".join(wheres) if wheres else "1=1"
+
+    # Beneficiários utilizados no mês
+    sql_util = f"""
+        SELECT COUNT(DISTINCT a.{id_benef_aut}) AS utilizados
+        FROM autorizacao a
+        JOIN beneficiario b ON b.{id_benef_ben} = a.{id_benef_aut}
+        {join_conta}
+        WHERE {where_sql}
+    """
+
+    # Base de beneficiários (sem cortes por competência; apenas filtros de beneficiário/produto)
+    where_base = []
+    binds_base: List[Any] = []
+    if where_b:
+        where_base += where_b
+        binds_base += binds_b
+    if produto_where:
+        where_base += produto_where
+        binds_base += produto_binds
+
+    where_base_sql = " AND ".join(where_base) if where_base else "1=1"
+    sql_base = f"""
+        SELECT COUNT(DISTINCT b.{id_benef_ben}) AS base
+        FROM beneficiario b
+        {('LEFT JOIN conta c ON c.' + find_col(con, 'conta', ['id_beneficiario','id_benef']) + f' = b.{id_benef_ben}') if join_conta else ''}
+        WHERE {where_base_sql}
+    """
+
+    # Total de autorizações no mês (usamos qt_autorizada se existir; senão COUNT(*))
+    col_qt = find_col(con, "autorizacao", ["qt_autorizada"])
+    if col_qt:
+        sql_aut = f"""
+            SELECT COALESCE(SUM(CAST(a.{col_qt} AS DOUBLE)), 0) AS autorizacoes
+            FROM autorizacao a
+            JOIN beneficiario b ON b.{id_benef_ben} = a.{id_benef_aut}
+            {join_conta}
+            WHERE {where_sql}
+        """
+        binds_aut = list(binds)
+    else:
+        sql_aut = f"""
+            SELECT COUNT(*) AS autorizacoes
+            FROM autorizacao a
+            JOIN beneficiario b ON b.{id_benef_ben} = a.{id_benef_aut}
+            {join_conta}
+            WHERE {where_sql}
+        """
+        binds_aut = list(binds)
+
+    try:
+        utilizados = int(get_con().execute(sql_util, binds).fetchone()[0])
+        base = int(get_con().execute(sql_base, binds_base).fetchone()[0])
+        autorizacoes = float(get_con().execute(sql_aut, binds_aut).fetchone()[0])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao calcular resumo: {e}")
+
+    return {
+        "competencia": competencia,
+        "beneficiarios_base": base,
+        "beneficiarios_utilizados": utilizados,
+        "autorizacoes": autorizacoes,
+        "filtros_aplicados": {k: v for k, v in {"produto": produto, "uf": uf, "cidade": cidade, "sexo": sexo, "faixa": faixa}.items() if v},
+    }
+
+@app.get("/kpi/utilizacao/evolucao")
+def kpi_utilizacao_evolucao(
+    desde: str = Query(..., description="YYYY-MM"),
+    ate: str = Query(..., description="YYYY-MM"),
+):
+    con = get_con()
+    if not table_exists(con, "autorizacao"):
+        raise HTTPException(status_code=400, detail="Tabela 'autorizacao' não existe no banco.")
+
+    id_benef = find_col(con, "autorizacao", ["id_beneficiario"])
+    dt_aut = find_col(con, "autorizacao", ["dt_autorizacao"])
+    if not id_benef or not dt_aut:
+        raise HTTPException(status_code=400, detail="Colunas essenciais ausentes em 'autorizacao' (precisa 'id_beneficiario' e 'dt_autorizacao').")
+
+    # cria lista de meses YYYY-MM entre 'desde' e 'ate'
+    def parse_m(s): return datetime.strptime(s, "%Y-%m")
+    cur = parse_m(desde)
+    end = parse_m(ate)
+    meses = []
+    while cur <= end:
+        meses.append(cur.strftime("%Y-%m"))
+        # incrementa mês
+        if cur.month == 12:
+            cur = cur.replace(year=cur.year+1, month=1)
+        else:
+            cur = cur.replace(month=cur.month+1)
+
+    mes_expr = to_month(f"a.{dt_aut}")
     out = []
-    for comp, ativos, util in rows:
-        out.append(
-            {
-                "fonte_utilizacao": src_table,
-                "competencia": comp,
-                "beneficiarios_ativos": int(ativos or 0),
-                "beneficiarios_utilizaram": int(util or 0),
-                "percentual_utilizacao": (float(util) / float(ativos)) if ativos else None,
-                "origem_criterio_ativo": origem_ativo,
-                "origem_filtros": filt_meta,
-            }
-        )
-    return out
+    for m in meses:
+        try:
+            n = con.execute(
+                f"SELECT COUNT(DISTINCT {id_benef}) FROM autorizacao a WHERE {mes_expr} = ?",
+                [m],
+            ).fetchone()[0]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Erro na competência {m}: {e}")
+        out.append({"competencia": m, "beneficiarios_utilizados": int(n)})
 
-# ---------- AUDITORIA ----------
-@app.get("/meta/schema", summary="Lista tabelas e colunas disponíveis (auditoria)")
-def meta_schema():
-    tables = con.execute(
-        "SELECT table_name FROM information_schema.tables ORDER BY 1"
-    ).fetchall()
+    return {"desde": desde, "ate": ate, "evolucao": out}
+
+# ------------ Demais KPIs (placeholders seguros) ------------
+# Mantemos os endpoints já publicados, mas devolvemos mensagens claras se faltar dado.
+
+@app.get("/kpi/sinistralidade/ultima")
+def kpi_sin_ultima():
+    # Exemplo simples: tenta usar 'conta' e 'mensalidade' se existir (placeholder)
+    con = get_con()
+    if not table_exists(con, "conta") or not table_exists(con, "mensalidade"):
+        raise HTTPException(status_code=400, detail="Requer tabelas 'conta' e 'mensalidade' para calcular sinistralidade.")
+    return {"detail": "Cálculo de sinistralidade será habilitado assim que confirmarmos as colunas de valor nos seus CSVs."}
+
+@app.get("/kpi/sinistralidade/media")
+def kpi_sin_media(meses: int = Query(6, ge=1, le=36)):
+    con = get_con()
+    if not table_exists(con, "conta") or not table_exists(con, "mensalidade"):
+        raise HTTPException(status_code=400, detail="Requer tabelas 'conta' e 'mensalidade' para calcular sinistralidade.")
+    return {"detail": "Cálculo de sinistralidade em construção — precisamos confirmar nomes das colunas de valores."}
+
+@app.get("/kpi/prestador/top")
+def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limite: int = 10):
+    con = get_con()
+    if not table_exists(con, "autorizacao"):
+        raise HTTPException(status_code=400, detail="Tabela 'autorizacao' não existe.")
+
+    id_prest = find_col(con, "autorizacao", ["id_prestador"])
+    dt_aut = find_col(con, "autorizacao", ["dt_autorizacao"])
+    if not id_prest or not dt_aut:
+        raise HTTPException(status_code=400, detail="Colunas 'id_prestador' e/ou 'dt_autorizacao' ausentes em 'autorizacao'.")
+
+    col_qt = find_col(con, "autorizacao", ["qt_autorizada"])
+    if col_qt:
+        agg = f"COALESCE(SUM(CAST(a.{col_qt} AS DOUBLE)),0)"
+    else:
+        agg = "COUNT(*)"
+
+    join_prest = ""
+    nome_col = None
+    if table_exists(con, "prestador"):
+        # Tenta achar colunas de id/nome em 'prestador'
+        id_prest_tab = find_col(con, "prestador", ["id_prestador", "id_prest"])
+        nome_col = find_col(con, "prestador", ["nm_prestador", "ds_prestador", "nome", "razao_social"])
+        if id_prest_tab:
+            join_prest = f" LEFT JOIN prestador p ON p.{id_prest_tab} = a.{id_prest} "
+
+    sql = f"""
+        SELECT a.{id_prest} AS id_prestador,
+               {agg} AS score
+               {', p.' + nome_col + ' AS nome' if join_prest and nome_col else ''}
+        FROM autorizacao a
+        {join_prest}
+        WHERE {to_month(f'a.{dt_aut}')} = ?
+        GROUP BY 1 {', 3' if join_prest and nome_col else ''}
+        ORDER BY 2 DESC
+        LIMIT ?
+    """
+    rows = con.execute(sql, [competencia, limite]).fetchall()
     out = []
-    for (tname,) in tables:
-        out.append({"tabela": tname, "colunas": get_cols(tname)})
-    return out
+    for r in rows:
+        if join_prest and nome_col:
+            out.append({"id_prestador": r[0], "nome": r[2], "score": float(r[1])})
+        else:
+            out.append({"id_prestador": r[0], "score": float(r[1])})
+    return {"competencia": competencia, "top": out}
