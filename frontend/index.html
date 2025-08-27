@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Operadora KPIs</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Operadora KPIs</h1>
+    <p>Consumindo a API: <code id="apiBase"></code></p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Top Prestadores (impacto)</h2>
+      <form id="formTop">
+        <label>
+          Competência (YYYY-MM)
+          <input type="month" id="compTop" required />
+        </label>
+        <label>
+          Top N
+          <input type="number" id="limitTop" value="10" min="1" max="50" />
+        </label>
+        <button type="submit">Consultar</button>
+      </form>
+      <div id="outTop" class="output"></div>
+    </section>
+
+    <section class="card">
+      <h2>Sinistralidade (última & média)</h2>
+      <div class="row">
+        <button id="btnUltima">Carregar última</button>
+        <button id="btnMedia">Carregar média</button>
+      </div>
+      <div id="outSini" class="output"></div>
+    </section>
+
+    <section class="card">
+      <h2>Utilização — Resumo por filtros</h2>
+      <form id="formUtil">
+        <label>
+          Competência (YYYY-MM)
+          <input type="month" id="compUtil" required />
+        </label>
+        <label>
+          Produto (opcional)
+          <input type="text" id="prodUtil" placeholder="código ou nome" />
+        </label>
+        <label>
+          UF (opcional)
+          <input type="text" id="ufUtil" placeholder="SP, RJ..." />
+        </label>
+        <label>
+          Cidade (opcional)
+          <input type="text" id="cidUtil" placeholder="São Paulo, Rio..." />
+        </label>
+        <label>
+          Sexo (opcional)
+          <input type="text" id="sexoUtil" placeholder="M ou F" />
+        </label>
+        <label>
+          Faixa etária (opcional)
+          <input type="text" id="faixaUtil" placeholder="0-18, 19-59, 60+" />
+        </label>
+        <button type="submit">Consultar</button>
+      </form>
+      <div id="outUtil" class="output"></div>
+    </section>
+  </main>
+
+  <footer>
+    <a href="https://operadora-bot.onrender.com/docs" target="_blank">🔗 Swagger da API</a>
+  </footer>
+
+  <script>
+    // Base da API: use a URL do Render do backend
+    window.API_BASE = 'https://operadora-bot.onrender.com';
+  </script>
+  <script src="./app.js"></script>
+</body>
+</html>
