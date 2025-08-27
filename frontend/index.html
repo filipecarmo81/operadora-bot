@@ -5,60 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Operadora KPIs</title>
   <style>
-    :root {
-      --bg: #0f172a;
-      --panel: #111827;
-      --muted: #9CA3AF;
-      --fg: #E5E7EB;
-      --brand: #60A5FA;
-      --brand-2: #22d3ee;
-      --danger: #ef4444;
-      --ok: #10b981;
-      --border: #1f2937;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; padding: 24px;
-      background: radial-gradient(1200px 900px at 10% 0%, rgba(34,211,238,.08), transparent 40%),
-                  radial-gradient(1000px 700px at 95% 15%, rgba(96,165,250,.10), transparent 45%),
-                  var(--bg);
-      color: var(--fg); font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji","Segoe UI Emoji";
-    }
-    h1 { margin: 0 0 20px; letter-spacing:.3px; }
-    .grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
-    .card {
-      grid-column: span 4;
-      background: linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.01));
-      border: 1px solid var(--border);
-      border-radius: 14px; padding: 16px;
-      box-shadow: 0 10px 25px rgba(0,0,0,.25);
-    }
-    .card h2 { margin: 0 0 14px; font-size: 20px; }
-    label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
-    .row { display: flex; gap: 10px; align-items: center; }
-    input, select, button {
-      outline: none; border: 1px solid var(--border); background: #0b1220; color: var(--fg);
-      border-radius: 10px; padding: 11px 12px; font-size: 14px;
-    }
-    input::placeholder { color: #6b7280; }
-    button.btn {
-      background: linear-gradient(90deg, var(--brand), var(--brand-2));
-      border: none; font-weight: 600; cursor: pointer;
-      transition: transform .08s ease, filter .15s ease;
-    }
-    button.btn:hover { filter: brightness(1.08); }
-    button.btn:active { transform: translateY(1px); }
-    pre {
-      background: #0b1220; border:1px solid var(--border);
-      border-radius: 10px; padding: 12px; overflow:auto; max-height: 420px;
-    }
-    .err { color: var(--danger); margin-top: 8px; font-size: 13px; }
-    table { width:100%; border-collapse: collapse; margin-top: 8px; }
-    th, td { text-align: left; padding: 10px 8px; border-bottom:1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; }
-    .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
-    @media (max-width: 1200px){ .card{grid-column: span 6;} }
-    @media (max-width: 700px){ .card{grid-column: span 12;} }
+    :root { --bg:#0f172a; --panel:#111827; --muted:#9CA3AF; --fg:#E5E7EB; --brand:#60A5FA; --brand2:#22d3ee; --ok:#10b981; --danger:#ef4444; --border:#1f2937; }
+    *{box-sizing:border-box}
+    body{margin:0;padding:24px;background:radial-gradient(1200px 900px at 10% 0%,rgba(34,211,238,.08),transparent 40%),radial-gradient(1000px 700px at 95% 15%,rgba(96,165,250,.10),transparent 45%),var(--bg);color:var(--fg);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica Neue,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    h1{margin:0 0 20px}
+    .grid{display:grid;gap:16px;grid-template-columns:repeat(12,1fr)}
+    .card{grid-column:span 4;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01));border:1px solid var(--border);border-radius:14px;padding:16px;box-shadow:0 10px 25px rgba(0,0,0,.25)}
+    .card h2{margin:0 0 14px;font-size:20px}
+    label{display:block;font-size:12px;color:var(--muted);margin:10px 0 6px}
+    .row{display:flex;gap:10px;align-items:center}
+    input,button{outline:none;border:1px solid var(--border);background:#0b1220;color:var(--fg);border-radius:10px;padding:11px 12px;font-size:14px}
+    input::placeholder{color:#6b7280}
+    button.btn{background:linear-gradient(90deg,var(--brand),var(--brand2));border:none;font-weight:600;cursor:pointer;transition:transform .08s ease,filter .15s ease}
+    button.btn:hover{filter:brightness(1.08)}
+    button.btn:active{transform:translateY(1px)}
+    pre{background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:12px;overflow:auto;max-height:420px}
+    .err{color:var(--danger);margin-top:8px;font-size:13px}
+    .hint{color:var(--muted);font-size:13px;margin-top:6px}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--border)}
+    th{color:var(--muted);font-weight:600}
+    a.small{color:#93c5fd;text-decoration:none;font-size:12px}
+    @media (max-width:1200px){.card{grid-column:span 6}}
+    @media (max-width:700px){.card{grid-column:span 12}}
   </style>
 </head>
 <body>
@@ -66,93 +35,99 @@
 
   <div class="grid">
 
-    <!-- Card 1 — Top Prestadores (impacto) -->
+    <!-- Top Prestadores -->
     <section class="card">
       <h2>Top Prestadores (impacto)</h2>
       <label for="top_comp">Competência (YYYY-MM)</label>
       <input id="top_comp" type="month" />
-
       <label for="top_n">Top N</label>
       <div class="row">
         <input id="top_n" type="number" min="1" step="1" value="10" style="width:120px" />
         <button id="btn-top" type="button" class="btn">Consultar</button>
       </div>
-
       <div id="err-top" class="err"></div>
-
       <table id="top-tbl" style="display:none">
-        <thead>
-          <tr><th>id_prestador</th><th>nome</th><th>score</th></tr>
-        </thead>
+        <thead><tr><th>id_prestador</th><th>nome</th><th>score</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
 
-    <!-- Card 2 — Sinistralidade -->
+    <!-- Sinistralidade -->
     <section class="card">
       <h2>Sinistralidade (última & média)</h2>
-      <div class="row" style="gap:8px; margin: 6px 0 10px;">
+      <div class="row" style="gap:8px;margin:6px 0 10px">
         <button id="btn-ult" type="button" class="btn">Carregar última</button>
         <button id="btn-med" type="button" class="btn" style="background:linear-gradient(90deg,#34d399,#06b6d4)">Carregar média</button>
       </div>
+
+      <!-- bloco “bonitinho” em BRL -->
+      <div id="sin-cards" style="display:none">
+        <div class="row" style="gap:12px;flex-wrap:wrap">
+          <div style="flex:1;min-width:180px;background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:10px">
+            <div class="hint">Competência</div><div id="sin-comp" style="font-weight:700"></div>
+          </div>
+          <div style="flex:1;min-width:180px;background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:10px">
+            <div class="hint">Sinistro</div><div id="sin-sin" style="font-weight:700"></div>
+          </div>
+          <div style="flex:1;min-width:180px;background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:10px">
+            <div class="hint">Receita</div><div id="sin-rec" style="font-weight:700"></div>
+          </div>
+          <div style="flex:1;min-width:180px;background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:10px">
+            <div class="hint">Sinistralidade</div><div id="sin-idx" style="font-weight:700"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- JSON bruto opcional -->
       <pre id="sin-json" style="display:none"></pre>
       <div id="err-sin" class="err"></div>
       <div id="hint-sin" class="hint"></div>
     </section>
 
-    <!-- Card 3 — Utilização -->
+    <!-- Utilização -->
     <section class="card">
       <h2>Utilização — Resumo por filtros</h2>
-
       <label for="u_comp">Competência (YYYY-MM)</label>
       <input id="u_comp" type="month" />
-
       <label for="u_prod">Produto (opcional)</label>
       <input id="u_prod" placeholder="código ou nome" />
-
       <div class="row">
         <div style="flex:1">
-          <label for="u_uf">UF (opcional)</label>
-          <input id="u_uf" placeholder="SP, RJ..." />
+          <label for="u_uf">UF (opcional)</label><input id="u_uf" placeholder="SP, RJ..." />
         </div>
         <div style="flex:1">
-          <label for="u_cid">Cidade (opcional)</label>
-          <input id="u_cid" placeholder="São Paulo, Rio..." />
+          <label for="u_cid">Cidade (opcional)</label><input id="u_cid" placeholder="São Paulo, Rio..." />
         </div>
       </div>
-
       <div class="row">
         <div style="flex:1">
-          <label for="u_sexo">Sexo (opcional)</label>
-          <input id="u_sexo" placeholder="M ou F" />
+          <label for="u_sexo">Sexo (opcional)</label><input id="u_sexo" placeholder="M ou F" />
         </div>
         <div style="flex:1">
-          <label for="u_faixa">Faixa etária (opcional)</label>
-          <input id="u_faixa" placeholder="0-18, 19-59, 60+" />
+          <label for="u_faixa">Faixa etária (opcional)</label><input id="u_faixa" placeholder="0-18, 19-59, 60+" />
         </div>
       </div>
-
       <div class="row" style="margin-top:10px">
         <button id="btn-u" type="button" class="btn">Consultar</button>
       </div>
-
       <div id="err-u" class="err"></div>
       <div id="hint-u" class="hint"></div>
+      <div id="u-link" class="hint" style="display:none"></div>
       <pre id="u-json" style="display:none"></pre>
     </section>
 
   </div>
 
   <div class="hint" style="margin-top:18px">
-    <a href="https://operadora-bot.onrender.com/docs" target="_blank" style="color:#93c5fd; text-decoration:none;">Swagger da API</a>
+    <a href="https://operadora-bot.onrender.com/docs" target="_blank" class="small">Swagger da API</a>
   </div>
 
   <script>
-    // ===== CONFIG =====
     const API = "https://operadora-bot.onrender.com";
     let LAST_MONTH = null;
-
-    const $ = (id)=>document.getElementById(id);
+    const BRL = new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"});
+    const PCT = new Intl.NumberFormat("pt-BR",{style:"percent",minimumFractionDigits:2,maximumFractionDigits:2});
+    const $ = id => document.getElementById(id);
     const show = (el, on=true)=>{ el.style.display = on ? "" : "none"; };
 
     function ym(input){
@@ -170,19 +145,17 @@
     }
     async function fetchJson(url){
       try{
-        const r = await fetch(url, {mode:"cors"});
+        const r = await fetch(url);                  // GET simples
         const text = await r.text();
-        if(!r.ok){
-          // devolve erro com status e corpo
-          throw new Error(`HTTP ${r.status} — ${text || "(sem corpo)"}`);
-        }
+        if(!r.ok) throw new Error(`HTTP ${r.status} — ${text || "(sem corpo)"}`);
         return text ? JSON.parse(text) : {};
       }catch(err){
+        // erro de rede/CORS/etc → “Failed to fetch”
         throw new Error(err?.message || "Failed to fetch");
       }
     }
 
-    // ===== TOP PRESTADORES =====
+    // ====== TOP ======
     $("btn-top").onclick = async ()=>{
       $("err-top").textContent = "";
       const comp = ym($("top_comp"));
@@ -195,10 +168,7 @@
         tb.innerHTML = "";
         for(const r of rows){
           const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td>${r.id_prestador}</td>
-            <td>${r.nome}</td>
-            <td>${Number(r.score).toLocaleString("pt-BR", {maximumFractionDigits:2})}</td>`;
+          tr.innerHTML = `<td>${r.id_prestador}</td><td>${r.nome}</td><td>${Number(r.score).toLocaleString("pt-BR",{maximumFractionDigits:2})}</td>`;
           tb.appendChild(tr);
         }
         $("top-tbl").style.display = rows.length ? "" : "none";
@@ -208,38 +178,39 @@
       }
     };
 
-    // ===== SINISTRALIDADE =====
+    // ====== SINISTRALIDADE ======
+    function renderSin(data){
+      // cartão em BRL + %
+      $("sin-comp").textContent = data?.competencia ?? "-";
+      $("sin-sin").textContent  = BRL.format(Number(data?.sinistro || 0));
+      $("sin-rec").textContent  = BRL.format(Number(data?.receita  || 0));
+      const idx = Number(data?.sinistralidade || 0);
+      $("sin-idx").textContent  = isFinite(idx) ? PCT.format(idx) : "-";
+      show($("sin-cards"), true);
+      // JSON opcional (se quiser espiar)
+      $("sin-json").textContent = JSON.stringify(data, null, 2);
+    }
     $("btn-ult").onclick = async ()=>{
-      $("err-sin").textContent = ""; $("hint-sin").textContent = ""; show($("sin-json"), false);
-      try{
-        const data = await fetchJson(`${API}/kpi/sinistralidade/ultima`);
-        $("sin-json").textContent = JSON.stringify(data, null, 2);
-        show($("sin-json"), true);
-      }catch(e){ $("err-sin").textContent = e.message; }
+      $("err-sin").textContent = ""; $("hint-sin").textContent=""; show($("sin-json"), false); show($("sin-cards"), false);
+      try{ renderSin(await fetchJson(`${API}/kpi/sinistralidade/ultima`)); }
+      catch(e){ $("err-sin").textContent = e.message; }
     };
     $("btn-med").onclick = async ()=>{
-      $("err-sin").textContent = ""; $("hint-sin").textContent = ""; show($("sin-json"), false);
-      try{
-        const data = await fetchJson(`${API}/kpi/sinistralidade/media?janela_meses=12`);
-        $("sin-json").textContent = JSON.stringify(data, null, 2);
-        show($("sin-json"), true);
-      }catch(e){ $("err-sin").textContent = e.message; }
+      $("err-sin").textContent = ""; $("hint-sin").textContent=""; show($("sin-json"), false); show($("sin-cards"), false);
+      try{ renderSin(await fetchJson(`${API}/kpi/sinistralidade/media?janela_meses=12`)); }
+      catch(e){ $("err-sin").textContent = e.message; }
     };
 
-    // ===== UTILIZAÇÃO (com fallback e erro detalhado) =====
+    // ====== UTILIZAÇÃO ======
     $("btn-u").onclick = async ()=>{
-      $("err-u").textContent = ""; $("hint-u").textContent = ""; show($("u-json"), false);
+      $("err-u").textContent = ""; $("hint-u").textContent=""; show($("u-json"), false); show($("u-link"), false);
 
       let comp = ym($("u_comp"));
       const original = comp;
-
-      // se usuário escolheu mês acima do último conhecido, força fallback
-      if (LAST_MONTH && comp > LAST_MONTH) {
-        comp = LAST_MONTH;
-        $("u_comp").value = LAST_MONTH;
+      if (LAST_MONTH && comp > LAST_MONTH){
+        comp = LAST_MONTH; $("u_comp").value = LAST_MONTH;
         $("hint-u").innerHTML = `Sem dados para <b>${original}</b>. Usei <b>${LAST_MONTH}</b>.`;
       }
-
       const params = {
         competencia: comp,
         produto: $("u_prod").value,
@@ -249,38 +220,38 @@
         faixa: $("u_faixa").value
       };
       const url = `${API}/kpi/utilizacao/resumo?${qs(params)}`;
+      $("u-link").innerHTML = `URL chamada: <a class="small" href="${url}" target="_blank">abrir no navegador</a>`;
+      show($("u-link"), true);
 
       try{
         const data = await fetchJson(url);
         $("u-json").textContent = JSON.stringify(data, null, 2);
         show($("u-json"), true);
       }catch(e){
-        // última tentativa: se não tentei LAST_MONTH ainda, tenta agora e explica
+        // tenta com LAST_MONTH se diferente
         if (LAST_MONTH && original !== LAST_MONTH){
+          const url2 = `${API}/kpi/utilizacao/resumo?${qs({...params, competencia: LAST_MONTH})}`;
           try{
-            const data2 = await fetchJson(`${API}/kpi/utilizacao/resumo?${qs({...params, competencia: LAST_MONTH})}`);
+            const data2 = await fetchJson(url2);
             $("u_comp").value = LAST_MONTH;
             $("hint-u").innerHTML = `Sem dados para <b>${original}</b>. Usei <b>${LAST_MONTH}</b>.`;
+            $("u-link").innerHTML = `URL chamada: <a class="small" href="${url2}" target="_blank">abrir no navegador</a>`;
             $("u-json").textContent = JSON.stringify(data2, null, 2);
             show($("u-json"), true);
             return;
           }catch(_) {}
         }
-        $("err-u").textContent = e.message; // mostra status e corpo se vier do backend
+        $("err-u").textContent = e.message;
       }
     };
 
-    // ===== Bootstrap: descobre LAST_MONTH e preenche tudo com ele =====
+    // ====== INIT ======
     (async function init(){
       try{
         const ult = await fetchJson(`${API}/kpi/sinistralidade/ultima`);
         LAST_MONTH = ult?.competencia || new Date().toISOString().slice(0,7);
-      }catch{
-        LAST_MONTH = new Date().toISOString().slice(0,7);
-      }
-      // preencher inputs
+      }catch{ LAST_MONTH = new Date().toISOString().slice(0,7); }
       ["top_comp","u_comp"].forEach(id => { const el = $(id); if (el) el.value = LAST_MONTH; });
-      // disparar consultas iniciais para dar “vida” à página
       $("btn-top").click();
       $("btn-ult").click();
     })();
