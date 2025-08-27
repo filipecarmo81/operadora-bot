@@ -11,12 +11,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 APP_TITLE = "Operadora KPIs"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
 # ---------------------------------------------------------------------
-# DB path robusto (local e Render)
+# DB path (local e Render)
 # ---------------------------------------------------------------------
 def _resolve_db_path() -> Path:
     here = Path(__file__).resolve().parent
@@ -47,22 +47,18 @@ except Exception as e:
 # ---------------------------------------------------------------------
 def get_cols(table: str) -> List[str]:
     rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
-    return [r[1] for r in rows]  # nome da coluna
+    return [r[1] for r in rows]
 
 def _norm(s: str) -> str:
-    # normaliza: minúsculas e só letras/números/_ (remove acentos/caracteres estranhos)
     s = s.lower()
-    s = re.sub(r"[^a-z0-9_]+", "", s)
-    return s
+    return re.sub(r"[^a-z0-9_]+", "", s)
 
 def find_col(table: str, candidates: List[str]) -> Optional[str]:
     cols = get_cols(table)
     by_lower = {c.lower(): c for c in cols}
-    # 1) match exato (case-insensitive)
     for cand in candidates:
         if cand in by_lower:
             return by_lower[cand]
-    # 2) match normalizado (caso venha com acento/espaço)
     by_norm = {_norm(c): c for c in cols}
     for cand in candidates:
         if _norm(cand) in by_norm:
@@ -76,39 +72,35 @@ DATE_CANDIDATES = [
     "dt_autorizacao","dt_entrada",
 ]
 VALUE_CANDIDATES = [
+    # "conta" usuais
     "vl_liberado","vl_pago","vl_apresentado","vl_total","vl_bruto","vl_liquido","valor","vl_cobranca",
+    # "mensalidade" do seu CSV
+    "vl_premio","vl_sca","vl_coparticipacao","vl_pre_estabelecido",
 ]
 
-# fallback “fuzzy”: procura padrões
 def _pick_date_col_fuzzy(cols: List[str]) -> Optional[str]:
-    # preferências: começa com dt_ e contém comp|ref|mes   (competencia/referencia/mes)
     for c in cols:
         cl = c.lower()
         if cl.startswith("dt") and (("comp" in cl) or ("ref" in cl) or ("mes" in cl)):
             return c
-    # alternativa: qualquer coluna contendo "compet" ou "mes"
     for c in cols:
         cl = c.lower()
         if ("compet" in cl) or (re.search(r"\bmes\b", cl) is not None):
             return c
-    # última: qualquer coluna que pareça data
     for c in cols:
         if c.lower().startswith("dt"):
             return c
     return None
 
 def _pick_value_col_fuzzy(cols: List[str]) -> Optional[str]:
-    # preferências: começa com vl_ e contém liber|pago|apres
     for c in cols:
         cl = c.lower()
         if cl.startswith("vl") and (("liber" in cl) or ("pago" in cl) or ("apres" in cl) or ("total" in cl) or ("liq" in cl) or ("brut" in cl)):
             return c
-    # alternativa: contém 'valor' ou termina com '_valor'
     for c in cols:
         cl = c.lower()
         if ("valor" in cl) or cl.endswith("_valor"):
             return c
-    # última: qualquer vl_*
     for c in cols:
         if c.lower().startswith("vl"):
             return c
@@ -117,10 +109,8 @@ def _pick_value_col_fuzzy(cols: List[str]) -> Optional[str]:
 def find_date_value_cols(table: str) -> Tuple[str, str]:
     cols = get_cols(table)
     by_lower = {c.lower(): c for c in cols}
-    # tentativa exata
     date_col = next((by_lower[n] for n in DATE_CANDIDATES if n in by_lower), None)
     value_col = next((by_lower[n] for n in VALUE_CANDIDATES if n in by_lower), None)
-    # fallback fuzzy
     if not date_col:
         date_col = _pick_date_col_fuzzy(cols)
     if not value_col:
@@ -131,6 +121,18 @@ def find_date_value_cols(table: str) -> Tuple[str, str]:
             detail=f"Não encontrei DATA/VALOR em '{table}'. Colunas disponíveis: {cols}",
         )
     return date_col, value_col
+
+# Receita em “mensalidade”: soma automática do que existir
+def receita_expr_mensalidade() -> str:
+    cols = get_cols("mensalidade")
+    candidatos = ["vl_premio","vl_sca","vl_coparticipacao","vl_pre_estabelecido"]
+    presentes = [c for c in candidatos if c in cols]
+    if presentes:
+        soma = " + ".join([f"COALESCE({c},0)" for c in presentes])
+        return f"({soma})"
+    # fallback para 1 coluna “vl_*”
+    _, vcol = find_date_value_cols("mensalidade")
+    return f"COALESCE({vcol},0)"
 
 def month_str(d: date) -> str:
     return d.strftime("%Y-%m")
@@ -157,12 +159,8 @@ def latest_common_month() -> str:
         rows = con.execute(f"SELECT strftime('%Y-%m', max(CAST({c_date} AS DATE))) FROM conta").fetchall()
     return rows[0][0]
 
-def build_where_month(table: str, competencia: str) -> Tuple[str, List]:
-    date_col, _ = find_date_value_cols(table)
-    return f"strftime('%Y-%m', CAST({date_col} AS DATE)) = ?", [competencia]
-
 # ---------------------------------------------------------------------
-# Contagens (beneficiário base / utilizados / autorizações)
+# Contagens (base, utilizados, autorizações)
 # ---------------------------------------------------------------------
 def count_beneficiarios_base(
     sexo: Optional[str] = None,
@@ -172,7 +170,6 @@ def count_beneficiarios_base(
     competencia_ref: Optional[str] = None,
 ) -> int:
     tbl = "beneficiario"
-    cols = get_cols(tbl)
 
     def maybe(colnames: List[str]) -> Optional[str]:
         return find_col(tbl, colnames)
@@ -214,13 +211,13 @@ def count_beneficiarios_base(
                 try:
                     a,b = token.split("-",1)
                     parts.append(f"(date_diff('year', CAST({nasc_col} AS DATE), DATE '{ref}') BETWEEN {int(a)} AND {int(b)})")
-                except:  # noqa: E722
+                except:
                     pass
             elif token.endswith("+"):
                 try:
                     a = int(token[:-1])
                     parts.append(f"(date_diff('year', CAST({nasc_col} AS DATE), DATE '{ref}') >= {a})")
-                except:  # noqa: E722
+                except:
                     pass
         if parts:
             where.append("(" + " OR ".join(parts) + ")")
@@ -297,13 +294,13 @@ def count_utilizados_e_autorizacoes(
                 try:
                     a,b = token.split("-",1)
                     parts.append(f"(date_diff('year', CAST(b.{nasc_col} AS DATE), DATE '{ref}') BETWEEN {int(a)} AND {int(b)})")
-                except:  # noqa: E722
+                except:
                     pass
             elif token.endswith("+"):
                 try:
                     a = int(token[:-1])
                     parts.append(f"(date_diff('year', CAST(b.{nasc_col} AS DATE), DATE '{ref}') >= {a})")
-                except:  # noqa: E722
+                except:
                     pass
         if parts:
             where.append("(" + " OR ".join(parts) + ")")
@@ -355,14 +352,15 @@ def health():
 def kpi_sinistralidade_ultima():
     mes = latest_common_month()
     c_date, c_val = find_date_value_cols("conta")
-    m_date, m_val = find_date_value_cols("mensalidade")
+    m_date, _ = find_date_value_cols("mensalidade")  # só para pegar a data
+    receita_expr = receita_expr_mensalidade()
 
     (sinistro,) = con.execute(
         f"SELECT COALESCE(SUM({c_val}),0) FROM conta WHERE strftime('%Y-%m', CAST({c_date} AS DATE)) = ?",
         [mes],
     ).fetchone()
     (receita,) = con.execute(
-        f"SELECT COALESCE(SUM({m_val}),0) FROM mensalidade WHERE strftime('%Y-%m', CAST({m_date} AS DATE)) = ?",
+        f"SELECT COALESCE(SUM({receita_expr}),0) FROM mensalidade WHERE strftime('%Y-%m', CAST({m_date} AS DATE)) = ?",
         [mes],
     ).fetchone()
 
@@ -376,7 +374,9 @@ def kpi_sinistralidade_ultima():
 @app.get("/kpi/sinistralidade/media", tags=["default"])
 def kpi_sinistralidade_media(janela_meses: int = Query(12, ge=1, le=60)):
     c_date, c_val = find_date_value_cols("conta")
-    m_date, m_val = find_date_value_cols("mensalidade")
+    m_date, _ = find_date_value_cols("mensalidade")
+    receita_expr = receita_expr_mensalidade()
+
     rows = con.execute(
         f"""
         WITH c AS (SELECT DISTINCT strftime('%Y-%m', CAST({c_date} AS DATE)) AS mes FROM conta),
@@ -386,21 +386,22 @@ def kpi_sinistralidade_media(janela_meses: int = Query(12, ge=1, le=60)):
         """
     ).fetchall()
     meses = [r[0] for r in rows]
-    detalhe, acum = [], 0.0
+    detalhe, acum, n = [], 0.0, 0
     for mes in meses:
         (s,) = con.execute(
             f"SELECT COALESCE(SUM({c_val}),0) FROM conta WHERE strftime('%Y-%m', CAST({c_date} AS DATE)) = ?",
             [mes],
         ).fetchone()
         (r,) = con.execute(
-            f"SELECT COALESCE(SUM({m_val}),0) FROM mensalidade WHERE strftime('%Y-%m', CAST({m_date} AS DATE)) = ?",
+            f"SELECT COALESCE(SUM({receita_expr}),0) FROM mensalidade WHERE strftime('%Y-%m', CAST({m_date} AS DATE)) = ?",
             [mes],
         ).fetchone()
         ratio = float(s)/float(r) if r else None
         detalhe.append({"competencia": mes, "sinistro": float(s), "receita": float(r), "sinistralidade": ratio})
         if ratio is not None:
             acum += ratio
-    media = acum / max(1, len([d for d in detalhe if d["sinistralidade"] is not None]))
+            n += 1
+    media = (acum / n) if n else None
     return {"meses": meses[::-1], "media": media, "detalhe": detalhe[::-1]}
 
 # -------------------- PRESTADOR TOP / IMPACTO ----------------------
@@ -437,7 +438,7 @@ def kpi_prestador_top(competencia: str = Query(..., description="YYYY-MM"), limi
 
 @app.get("/kpi/prestador/impacto", tags=["default"])
 def kpi_prestador_impacto(competencia: str = Query(..., description="YYYY-MM"), top: int = Query(10, ge=1, le=100)):
-    return kpi_prestador_top(competencia, top)  # alias
+    return kpi_prestador_top(competencia, top)
 
 # -------------------- FAIXA x CUSTO --------------------------------
 @app.get("/kpi/faixa/custo", tags=["default"])
