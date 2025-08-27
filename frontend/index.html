@@ -4,81 +4,233 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Operadora KPIs</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    :root{
+      --bg:#0f172a; --panel:#111827; --muted:#94a3b8; --txt:#e5e7eb;
+      --accent:#22d3ee; --accent2:#60a5fa; --danger:#f87171; --ok:#34d399;
+      --chip:#1f2937; --border:#263042;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(180deg,#0b1222,#0f172a 40%,#0f172a);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif}
+    .wrap{max-width:1200px;margin:32px auto;padding:0 16px}
+    h1{font-size:28px;margin:0 0 20px}
+    .grid{display:grid;gap:16px}
+    @media(min-width:900px){.grid{grid-template-columns:1fr 1fr 1fr}}
+    .card{background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01));border:1px solid var(--border);border-radius:14px;padding:16px;backdrop-filter:blur(6px)}
+    .card h2{margin:0 0 12px;font-size:20px}
+    label{display:block;font-size:13px;color:var(--muted);margin:10px 0 6px}
+    input,button,select{font:inherit}
+    input[type="month"],input[type="text"],input[type="number"]{
+      width:100%;padding:10px 12px;background:#0b1324;color:var(--txt);
+      border:1px solid var(--border);border-radius:10px;outline:none;
+    }
+    input::placeholder{color:#6b7280}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .btn{
+      display:inline-flex;align-items:center;gap:8px;border:0;
+      background:linear-gradient(90deg,var(--accent),var(--accent2));
+      color:#05121b;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:600
+    }
+    .btn:disabled{opacity:.6;cursor:default}
+    .btn.secondary{background:#1f2937;color:#d1d5db}
+    .table{width:100%;border-collapse:collapse;margin-top:10px}
+    .table th,.table td{padding:8px;border-bottom:1px solid #1f2635;text-align:left;font-size:14px}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;white-space:pre-wrap;background:#0b1324;border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:10px}
+    .err{color:var(--danger);margin-top:8px;font-size:14px}
+    .ok{color:var(--ok)}
+    .footer{margin:26px 0 6px;color:var(--muted);font-size:13px}
+    a{color:#a5b4fc;text-decoration:none}
+  </style>
 </head>
 <body>
-  <header>
+  <div class="wrap">
     <h1>Operadora KPIs</h1>
-    <p>Consumindo a API: <code id="apiBase"></code></p>
-  </header>
 
-  <main>
-    <section class="card">
-      <h2>Top Prestadores (impacto)</h2>
-      <form id="formTop">
-        <label>
-          Competência (YYYY-MM)
-          <input type="month" id="compTop" required />
-        </label>
-        <label>
-          Top N
-          <input type="number" id="limitTop" value="10" min="1" max="50" />
-        </label>
-        <button type="submit">Consultar</button>
-      </form>
-      <div id="outTop" class="output"></div>
-    </section>
-
-    <section class="card">
-      <h2>Sinistralidade (última & média)</h2>
-      <div class="row">
-        <button id="btnUltima">Carregar última</button>
-        <button id="btnMedia">Carregar média</button>
+    <div class="grid">
+      <!-- TOP PRESTADORES -->
+      <div class="card" id="card-top">
+        <h2>Top Prestadores (impacto)</h2>
+        <label>Competência (YYYY-MM)</label>
+        <input type="month" id="top_comp" />
+        <label>Top N</label>
+        <input type="number" id="top_n" value="10" min="1" />
+        <div style="margin-top:10px">
+          <button class="btn" id="btn-top">Consultar</button>
+        </div>
+        <div class="err" id="err-top"></div>
+        <table class="table" id="top-tbl" style="display:none">
+          <thead><tr><th>id_prestador</th><th>nome</th><th>score</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
-      <div id="outSini" class="output"></div>
-    </section>
 
-    <section class="card">
-      <h2>Utilização — Resumo por filtros</h2>
-      <form id="formUtil">
-        <label>
-          Competência (YYYY-MM)
-          <input type="month" id="compUtil" required />
-        </label>
-        <label>
-          Produto (opcional)
-          <input type="text" id="prodUtil" placeholder="código ou nome" />
-        </label>
-        <label>
-          UF (opcional)
-          <input type="text" id="ufUtil" placeholder="SP, RJ..." />
-        </label>
-        <label>
-          Cidade (opcional)
-          <input type="text" id="cidUtil" placeholder="São Paulo, Rio..." />
-        </label>
-        <label>
-          Sexo (opcional)
-          <input type="text" id="sexoUtil" placeholder="M ou F" />
-        </label>
-        <label>
-          Faixa etária (opcional)
-          <input type="text" id="faixaUtil" placeholder="0-18, 19-59, 60+" />
-        </label>
-        <button type="submit">Consultar</button>
-      </form>
-      <div id="outUtil" class="output"></div>
-    </section>
-  </main>
+      <!-- SINISTRALIDADE -->
+      <div class="card">
+        <h2>Sinistralidade (última & média)</h2>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <button class="btn secondary" id="btn-ult">Carregar última</button>
+          <button class="btn secondary" id="btn-med">Carregar média</button>
+        </div>
+        <div class="err" id="err-sin"></div>
+        <div class="mono" id="sin-json" style="display:none"></div>
+      </div>
 
-  <footer>
-    <a href="https://operadora-bot.onrender.com/docs" target="_blank">🔗 Swagger da API</a>
-  </footer>
+      <!-- UTILIZAÇÃO -->
+      <div class="card">
+        <h2>Utilização — Resumo por filtros</h2>
+        <label>Competência (YYYY-MM)</label>
+        <input type="month" id="u_comp" />
+        <label>Produto (opcional)</label>
+        <input type="text" id="u_prod" placeholder="código ou nome" />
+        <div class="row">
+          <div>
+            <label>UF (opcional)</label>
+            <input type="text" id="u_uf" placeholder="SP, RJ..." />
+          </div>
+          <div>
+            <label>Cidade (opcional)</label>
+            <input type="text" id="u_cid" placeholder="São Paulo, Rio..." />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Sexo (opcional)</label>
+            <input type="text" id="u_sexo" placeholder="M ou F" />
+          </div>
+          <div>
+            <label>Faixa etária (opcional)</label>
+            <!-- agora é SÓ placeholder; valor inicial vazio -->
+            <input type="text" id="u_faixa" placeholder="0-18, 19-59, 60+" />
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <button class="btn" id="btn-u">Consultar</button>
+        </div>
+        <div class="err" id="err-u"></div>
+        <div class="mono" id="u-json" style="display:none"></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <a href="https://operadora-bot.onrender.com/docs" target="_blank">Swagger da API</a>
+    </div>
+  </div>
 
   <script>
-    // Base da API: use a URL do Render do backend
-    window.API_BASE = 'https://operadora-bot.onrender.com';
+    // ===== CONFIG =====
+    const API = "https://operadora-bot.onrender.com";
+
+    // Helpers
+    const $ = (id)=>document.getElementById(id);
+    const show = (el, on=true)=>{el.style.display = on ? "" : "none";};
+
+    async function req(url){
+      try{
+        const r = await fetch(url, {mode:"cors"});
+        if(!r.ok){
+          const txt = await r.text().catch(()=>"(sem corpo)");
+          throw new Error(`HTTP ${r.status} - ${txt}`);
+        }
+        return await r.json();
+      }catch(e){
+        // bubbles up as proper message
+        throw new Error(e?.message || "Failed to fetch");
+      }
+    }
+
+    function qsClean(obj){
+      const p = new URLSearchParams();
+      for(const [k,v] of Object.entries(obj)){
+        if(v===undefined || v===null) continue;
+        const sv = String(v).trim();
+        if(sv!=="") p.set(k, sv);
+      }
+      return p.toString();
+    }
+
+    function ymOrToday(input){
+      // usa valor do input type=month (YYYY-MM) ou hoje
+      const v = input.value?.trim();
+      return v && /^\d{4}-\d{2}$/.test(v) ? v : new Date().toISOString().slice(0,7);
+    }
+
+    // ===== Top Prestadores =====
+    $("btn-top").onclick = async ()=>{
+      $("err-top").textContent = "";
+      $("top-tbl").style.display = "none";
+      const comp = ymOrToday($("top_comp"));
+      const n = Math.max(1, parseInt($("top_n").value || "10",10));
+      const url = `${API}/kpi/prestador/impacto?${qsClean({competencia:comp, top:n})}`;
+      try{
+        const data = await req(url);
+        const tb = $("top-tbl").querySelector("tbody");
+        tb.innerHTML = "";
+        (data.top||[]).forEach(r=>{
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${r.id_prestador}</td><td>${r.nome}</td><td>${Number(r.score).toLocaleString("pt-BR",{maximumFractionDigits:2})}</td>`;
+          tb.appendChild(tr);
+        });
+        $("top-tbl").style.display = "";
+      }catch(e){
+        $("err-top").textContent = e.message || "Failed to fetch";
+      }
+    };
+
+    // ===== Sinistralidade =====
+    $("btn-ult").onclick = async ()=>{
+      $("err-sin").textContent = ""; show($("sin-json"), false);
+      try{
+        const data = await req(`${API}/kpi/sinistralidade/ultima`);
+        $("sin-json").textContent = JSON.stringify(data,null,2);
+        show($("sin-json"), true);
+      }catch(e){ $("err-sin").textContent = e.message; }
+    };
+    $("btn-med").onclick = async ()=>{
+      $("err-sin").textContent = ""; show($("sin-json"), false);
+      try{
+        const data = await req(`${API}/kpi/sinistralidade/media?janela_meses=12`);
+        $("sin-json").textContent = JSON.stringify(data,null,2);
+        show($("sin-json"), true);
+      }catch(e){ $("err-sin").textContent = e.message; }
+    };
+
+    // ===== Utilização =====
+    $("btn-u").onclick = async ()=>{
+      $("err-u").textContent = ""; show($("u-json"), false);
+      const comp = ymOrToday($("u_comp"));
+      const params = {
+        competencia: comp,
+        produto: $("u_prod").value,
+        uf: $("u_uf").value,
+        cidade: $("u_cid").value,
+        sexo: $("u_sexo").value,
+        faixa: $("u_faixa").value
+      };
+      const url = `${API}/kpi/utilizacao/resumo?${qsClean(params)}`;
+      try{
+        const data = await req(url);
+        $("u-json").textContent = JSON.stringify(data,null,2);
+        show($("u-json"), true);
+      }catch(e){
+        $("err-u").textContent = e.message || "Failed to fetch";
+      }
+    };
+
+    // ===== Prefill competências com a “mais recente” do backend =====
+    (async function bootstrap(){
+      try{
+        const ult = await req(`${API}/kpi/sinistralidade/ultima`);
+        const mes = ult?.competencia || new Date().toISOString().slice(0,7);
+        // preenche os três inputs
+        ["top_comp","u_comp"].forEach(id=>{ const i=$(id); if(i) i.value = mes; });
+      }catch{ /* se falhar, usa hoje */ 
+        const mes = new Date().toISOString().slice(0,7);
+        ["top_comp","u_comp"].forEach(id=>{ const i=$(id); if(i) i.value = mes; });
+      }
+      // dispara uma consulta inicial para Top e Sinistralidade
+      $("btn-top").click();
+      $("btn-ult").click();
+    })();
   </script>
-  <script src="./app.js"></script>
 </body>
 </html>
