@@ -1,249 +1,291 @@
 # backend/app.py
-from __future__ import annotations
-
-import os
-import re
-from typing import Dict, List, Optional
-
-import duckdb
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional, Dict, Any
+import os
+import duckdb
 
-# ------------------------------------------------------------------------------
-# Config
-# ------------------------------------------------------------------------------
+APP_TITLE = "Operadora KPIs"
+APP_VERSION = "0.3.0"
 
-DB_PATH = os.getenv(
-    "OPERADORA_DB",
-    os.path.join(os.path.dirname(__file__), "data", "operadora.duckdb"),
-)
+# Caminho do banco (build gera em backend/data/operadora.duckdb)
+DB_CANDIDATES = [
+    "/opt/render/project/src/backend/data/operadora.duckdb",   # Render
+    "backend/data/operadora.duckdb",                           # local (repo)
+    "data/operadora.duckdb",                                   # fallback
+]
 
-# ------------------------------------------------------------------------------
-# FastAPI + CORS (ABERTO TEMPORARIAMENTE)
-# ------------------------------------------------------------------------------
+def db_path() -> str:
+    for p in DB_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    # ainda assim devolve o primeiro para a mensagem de health
+    return DB_CANDIDATES[0]
 
-app = FastAPI(title="Operadora KPIs", version="0.2.1")
+def con_ro():
+    # read_only=True evita lock em produção
+    return duckdb.connect(db_path(), read_only=True)
 
-# Libera tudo para eliminar qualquer bloqueio de CORS no front
+def show_tables(c) -> List[str]:
+    # mais robusto que PRAGMA em ambientes diferentes
+    rows = c.execute("SELECT table_name FROM duckdb_information_schema.tables WHERE database_name=current_database() ORDER BY 1").fetchall()
+    return [r[0] for r in rows]
+
+def table_cols(c, table: str) -> List[str]:
+    rows = c.execute(f"PRAGMA table_info('{table}')").fetchall()
+    # esquema: [cid, name, type, notnull, dflt, pk]
+    return [r[1] for r in rows]
+
+def first_present(cols: List[str], candidates: List[str]) -> Optional[str]:
+    for name in candidates:
+        if name in cols:
+            return name
+    return None
+
+def month_sql(col: str) -> str:
+    """
+    Normaliza qualquer coluna de data para 'YYYY-MM'.
+    Suporta 'YYYY-MM', 'YYYY-MM-DD', 'DD/MM/YYYY', 'YYYYMMDD' e DATE nativo.
+    """
+    return (
+        "strftime(COALESCE("
+        f"try_strptime({col}, '%Y-%m-%d'),"
+        f"try_strptime({col}, '%Y-%m'),"
+        f"try_strptime({col}, '%d/%m/%Y'),"
+        f"try_strptime({col}, '%Y%m%d'),"
+        f"CAST({col} AS DATE)"
+        "), '%Y-%m')"
+    )
+
+def ensure_cols_or_400(c, table: str, needed: Dict[str, List[str]]) -> Dict[str, str]:
+    """
+    Garante que as colunas (data/valor) existam na tabela.
+    Retorna o mapeamento real { logical_name: real_col }.
+    Levanta 400 com mensagem amigável caso não ache.
+    """
+    cols = set(table_cols(c, table))
+    resolved = {}
+    for logical, candidates in needed.items():
+        real = first_present(list(cols), candidates)
+        if not real:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Não encontrei {logical.upper()} em '{table}'. "
+                    f"Tente uma destas colunas: {candidates}. "
+                    f"Colunas disponíveis: {sorted(cols)}"
+                ),
+            )
+        resolved[logical] = real
+    return resolved
+
+app = FastAPI(title=APP_TITLE, version=APP_VERSION)
+
+# --------- CORS (resolve 'Failed to fetch' no front) ----------
+ALLOWED_ORIGINS = [
+    "https://operadora-bot.onrender.com",    # backend (para testes diretos)
+    "https://operadora-bot-1.onrender.com",  # seu frontend Render
+    "http://localhost:5173",                 # dev Vite
+    "http://127.0.0.1:5173",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],   # GET, POST, OPTIONS, HEAD...
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# garante resposta 204 para preflight
-@app.options("/{rest_of_path:path}")
-def preflight(rest_of_path: str):
-    return Response(status_code=204)
+# -------------------- Raiz & Health ---------------------------
+@app.get("/")
+def root():
+    with con_ro() as c:
+        return {
+            "ok": True,
+            "message": "API do Operadora Bot. Use /docs para testar.",
+            "db": db_path(),
+            "tables": show_tables(c),
+            "endpoints": [
+                "/health",
+                "/debug/cols",
+                "/kpi/sinistralidade/ultima",
+                "/kpi/sinistralidade/competencia?competencia=YYYY-MM",
+                "/kpi/sinistralidade/media",
+                "/kpi/prestador/top?competencia=YYYY-MM&limite=10",
+                "/kpi/prestador/impacto?competencia=YYYY-MM&top=10",
+                "/kpi/utilizacao/resumo?competencia=YYYY-MM",
+            ],
+        }
 
-# ------------------------------------------------------------------------------
-# Helpers de DB
-# ------------------------------------------------------------------------------
+@app.get("/health")
+def health():
+    with con_ro() as c:
+        return {
+            "ok": True,
+            "db": db_path(),
+            "tables": show_tables(c),
+        }
 
-def connect() -> duckdb.DuckDBPyConnection:
-    try:
-        return duckdb.connect(DB_PATH, read_only=True)
-    except Exception as e:
-        raise HTTPException(500, detail=f"Falha ao abrir DuckDB: {e}")
+@app.get("/debug/cols")
+def debug_cols(table: Optional[str] = None):
+    with con_ro() as c:
+        if table:
+            return {table: table_cols(c, table)}
+        return {t: table_cols(c, t) for t in show_tables(c)}
 
-def list_tables(con) -> List[str]:
-    rows = con.execute(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema='main' ORDER BY 1"
-    ).fetchall()
-    return [r[0] for r in rows]
-
-def get_cols(con, table: str) -> List[str]:
-    rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
-    return [r[1] for r in rows]
-
-def find_col(con, table: str, candidates: List[str]) -> Optional[str]:
-    cols = get_cols(con, table)
-    lower = {c.lower(): c for c in cols}
-    for want in candidates:
-        if want.lower() in lower:
-            return lower[want.lower()]
-    for want in candidates:
-        w = want.lower()
-        for c in cols:
-            cl = c.lower()
-            if cl == w or cl.startswith(w) or w in cl:
-                return c
-    return None
-
-def month_predicate(col: str, param_name: str = "comp") -> str:
-    return (
-        f"(strftime('%Y-%m', TRY_CAST({col} AS DATE)) = ${param_name} "
-        f"OR substr(CAST({col} AS VARCHAR), 1, 7) = ${param_name} "
-        f"OR {col} = ${param_name})"
+# ----------------- SINISTRALIDADE -----------------------------
+def sinistralidade_do_mes(c, competencia: str) -> Dict[str, Any]:
+    """
+    Sinistralidade = sum(conta.vl_liberado) / sum(mensalidade.vl_premio) no mês (YYYY-MM)
+    """
+    # conta: data + vl_liberado
+    conta_map = ensure_cols_or_400(
+        c,
+        "conta",
+        {
+            "data": ["dt_mes_competencia", "dt_competencia", "competencia", "dt_apresentada", "dt_conta"],
+            "valor": ["vl_liberado"],
+        },
+    )
+    mens_map = ensure_cols_or_400(
+        c,
+        "mensalidade",
+        {
+            "data": ["dt_competencia", "dt_mes_competencia", "competencia"],
+            "valor": ["vl_premio"],
+        },
     )
 
-def sum_value(con, table: str, val_cols: List[str], dt_cols: List[str], competencia: str) -> float:
-    val = find_col(con, table, val_cols)
-    dt = find_col(con, table, dt_cols)
-    if not val or not dt:
-        return 0.0
-    sql = f"""
-        SELECT COALESCE(SUM(CAST({val} AS DOUBLE)), 0) AS total
-        FROM {table}
-        WHERE {month_predicate(dt)}
-    """
-    try:
-        row = con.execute(sql, {"comp": competencia}).fetchone()
-        return float(row[0] or 0.0)
-    except Exception:
-        return 0.0
+    mes_conta = month_sql(conta_map["data"])
+    mes_mens  = month_sql(mens_map["data"])
 
-# ------------------------------------------------------------------------------
-# Meta
-# ------------------------------------------------------------------------------
+    sinistro = c.execute(
+        f"SELECT COALESCE(SUM({conta_map['valor']}), 0)::DOUBLE "
+        f"FROM conta WHERE {mes_conta} = ?", [competencia]
+    ).fetchone()[0]
 
-@app.get("/", tags=["Meta"])
-def root():
-    con = connect()
+    receita = c.execute(
+        f"SELECT COALESCE(SUM({mens_map['valor']}), 0)::DOUBLE "
+        f"FROM mensalidade WHERE {mes_mens} = ?", [competencia]
+    ).fetchone()[0]
+
+    sinistralidade = (sinistro / receita) if receita else 0.0
+
     return {
-        "ok": True,
-        "message": "API do Operadora Bot. Use /docs para testar.",
-        "db": DB_PATH,
-        "tables": list_tables(con),
-        "endpoints": [
-            "/health",
-            "/debug/cols",
-            "/kpi/sinistralidade/ultima",
-            "/kpi/sinistralidade/competencia?competencia=YYYY-MM",
-            "/kpi/sinistralidade/media",
-            "/kpi/prestador/top?competencia=YYYY-MM&limite=10",
-            "/kpi/prestador/impacto?competencia=YYYY-MM&top=10",
-            "/kpi/utilizacao/resumo?competencia=YYYY-MM",
-        ],
+        "competencia": competencia,
+        "sinistro": sinistro,
+        "receita": receita,
+        "sinistralidade": sinistralidade,
     }
 
-@app.get("/health", tags=["Meta"])
-def health():
-    con = connect()
-    return {"ok": True, "db": DB_PATH, "tables": list_tables(con)}
-
-@app.get("/debug/cols", tags=["Meta"])
-def debug_cols():
-    con = connect()
-    return {t: get_cols(con, t) for t in list_tables(con)}
-
-# ------------------------------------------------------------------------------
-# Sinistralidade (apenas: conta.vl_liberado e mensalidade.vl_premio)
-# ------------------------------------------------------------------------------
-
-def sinis_comp(con, competencia: str):
-    custo = sum_value(
-        con, "conta",
-        val_cols=["vl_liberado", "valor_liberado", "vl_pago"],
-        dt_cols=["dt_mes_competencia", "dt_competencia", "dt_conta", "dt_lancamento"],
-        competencia=competencia,
+def competencia_ultima(c) -> str:
+    # maior mês existente em conta ou mensalidade
+    conta_map = ensure_cols_or_400(
+        c, "conta", {"data": ["dt_mes_competencia", "dt_competencia", "competencia", "dt_apresentada", "dt_conta"]}
     )
-    premio = sum_value(
-        con, "mensalidade",
-        val_cols=["vl_premio", "valor_premio", "vl_receita"],
-        dt_cols=["dt_competencia", "dt_mes_competencia", "dt_pagamento"],
-        competencia=competencia,
+    mens_map = ensure_cols_or_400(
+        c, "mensalidade", {"data": ["dt_competencia", "dt_mes_competencia", "competencia"]}
     )
-    sin = (custo / premio) if premio and premio > 0 else 0.0
-    return {"competencia": competencia, "sinistro": custo, "receita": premio, "sinistralidade": sin}
-
-@app.get("/kpi/sinistralidade/competencia", tags=["Sinistralidade"])
-def sinistralidade_competencia(competencia: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
-    con = connect()
-    return sinis_comp(con, competencia)
-
-@app.get("/kpi/sinistralidade/ultima", tags=["Sinistralidade"])
-def sinistralidade_ultima():
-    con = connect()
-    mdt = find_col(con, "mensalidade", ["dt_competencia", "dt_mes_competencia", "dt_pagamento"])
-    cdt = find_col(con, "conta", ["dt_mes_competencia", "dt_competencia", "dt_conta", "dt_lancamento"])
-    meses = []
-    if mdt:
-        try:
-            r = con.execute(
-                f"SELECT strftime('%Y-%m', TRY_CAST({mdt} AS DATE)) AS m "
-                f"FROM mensalidade WHERE m IS NOT NULL ORDER BY 1 DESC LIMIT 1"
-            ).fetchone()
-            if r and r[0]: meses.append(r[0])
-        except Exception:
-            pass
-    if cdt:
-        try:
-            r = con.execute(
-                f"SELECT strftime('%Y-%m', TRY_CAST({cdt} AS DATE)) AS m "
-                f"FROM conta WHERE m IS NOT NULL ORDER BY 1 DESC LIMIT 1"
-            ).fetchone()
-            if r and r[0]: meses.append(r[0])
-        except Exception:
-            pass
-    if not meses:
-        raise HTTPException(400, detail="Não foi possível detectar a última competência.")
-    comp = sorted(set(meses), reverse=True)[0]
-    return sinis_comp(con, comp)
-
-@app.get("/kpi/sinistralidade/media", tags=["Sinistralidade"])
-def sinistralidade_media(janela: int = 6):
-    con = connect()
-    mdt = find_col(con, "mensalidade", ["dt_competencia", "dt_mes_competencia", "dt_pagamento"])
-    if not mdt:
-        raise HTTPException(400, detail="Não encontrei competência em 'mensalidade'.")
-    meses = [r[0] for r in con.execute(
-        f"SELECT DISTINCT strftime('%Y-%m', TRY_CAST({mdt} AS DATE)) AS m "
-        f"FROM mensalidade WHERE m IS NOT NULL ORDER BY 1 DESC LIMIT {int(janela)}"
-    ).fetchall()]
-    if not meses:
-        return {"janela": janela, "media": 0.0, "series": []}
-    series = [sinis_comp(con, m) for m in meses]
-    vals = [s['sinistralidade'] for s in series]
-    media = sum(vals) / len(vals) if vals else 0.0
-    return {"janela": janela, "media": media, "series": series}
-
-# ------------------------------------------------------------------------------
-# Prestador (top/impacto) – score = soma do vl_liberado no mês
-# ------------------------------------------------------------------------------
-
-def prestador_top_data(con, competencia: str, limite: int):
-    cdt = find_col(con, "conta", ["dt_mes_competencia", "dt_competencia", "dt_conta"])
-    vl  = find_col(con, "conta", ["vl_liberado", "vl_pago", "valor_liberado"])
-    idc = find_col(con, "conta", ["id_prestador_envio", "id_prestador", "cd_prestador"])
-    idp = find_col(con, "prestador", ["id_prestador", "cd_prestador"])
-    nmp = find_col(con, "prestador", ["nm_prestador", "nome", "nm_razao_social"])
-    if not all([cdt, vl, idc, idp, nmp]):
-        return []
-    sql = f"""
-        WITH ag AS (
-            SELECT {idc} AS id_prestador, COALESCE(SUM(CAST({vl} AS DOUBLE)),0) AS score
-            FROM conta
-            WHERE {month_predicate(cdt)}
-            GROUP BY 1
+    mes_conta = month_sql(conta_map["data"])
+    mes_mens  = month_sql(mens_map["data"])
+    row = c.execute(
+        f"""
+        WITH meses AS (
+          SELECT {mes_conta} AS mes FROM conta
+          UNION
+          SELECT {mes_mens}  AS mes FROM mensalidade
         )
-        SELECT a.id_prestador, p.{nmp} AS nome, a.score
-        FROM ag a LEFT JOIN prestador p ON p.{idp} = a.id_prestador
-        ORDER BY a.score DESC
-        LIMIT {int(limite)}
-    """
-    rows = con.execute(sql, {"comp": competencia}).fetchall()
-    return [{"id_prestador": r[0], "nome": r[1], "score": r[2]} for r in rows]
+        SELECT MAX(mes) FROM meses
+        """
+    ).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(status_code=400, detail="Não encontrei meses em 'conta' ou 'mensalidade'.")
+    return row[0]
 
-@app.get("/kpi/prestador/top", tags=["Prestador"])
-def kpi_prestador_top(competencia: str = Query(..., pattern=r"^\d{4}-\d{2}$"), limite: int = 10):
-    con = connect()
-    return {"competencia": competencia, "top": prestador_top_data(con, competencia, limite)}
+@app.get("/kpi/sinistralidade/competencia")
+def sinistralidade_competencia(competencia: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
+    with con_ro() as c:
+        return sinistralidade_do_mes(c, competencia)
 
-@app.get("/kpi/prestador/impacto", tags=["Prestador"])
-def kpi_prestador_impacto(competencia: str = Query(..., pattern=r"^\d{4}-\d{2}$"), top: int = 10):
-    con = connect()
-    return {"competencia": competencia, "top": prestador_top_data(con, competencia, top)}
+@app.get("/kpi/sinistralidade/ultima")
+def sinistralidade_ultima():
+    with con_ro() as c:
+        comp = competencia_ultima(c)
+        return sinistralidade_do_mes(c, comp)
 
-# ------------------------------------------------------------------------------
-# Utilização – resumo (filtros simples)
-# ------------------------------------------------------------------------------
+@app.get("/kpi/sinistralidade/media")
+def sinistralidade_media(ultimos: int = 6):
+    with con_ro() as c:
+        # pega últimos N meses disponíveis (união conta/mensalidade)
+        conta_map = ensure_cols_or_400(
+            c, "conta", {"data": ["dt_mes_competencia", "dt_competencia", "competencia", "dt_apresentada", "dt_conta"]}
+        )
+        mens_map = ensure_cols_or_400(
+            c, "mensalidade", {"data": ["dt_competencia", "dt_mes_competencia", "competencia"]}
+        )
+        mes_conta = month_sql(conta_map["data"])
+        mes_mens  = month_sql(mens_map["data"])
 
-@app.get("/kpi/utilizacao/resumo", tags=["Utilização"])
-def kpi_utilizacao_resumo(
+        meses = [r[0] for r in c.execute(
+            f"""
+            WITH meses AS (
+              SELECT DISTINCT {mes_conta} AS mes FROM conta
+              UNION
+              SELECT DISTINCT {mes_mens}  AS mes FROM mensalidade
+            )
+            SELECT mes FROM meses WHERE mes IS NOT NULL ORDER BY mes DESC LIMIT ?
+            """, [ultimos]
+        ).fetchall()]
+
+        if not meses:
+            raise HTTPException(status_code=400, detail="Não encontrei meses para calcular a média.")
+
+        pontos = [sinistralidade_do_mes(c, m) for m in meses]
+        media = sum(p["sinistralidade"] for p in pontos) / len(pontos)
+        return {"meses": meses, "media": media, "observacoes": len(meses)}
+
+# ----------------- PRESTADOR (impacto / top) ------------------
+@app.get("/kpi/prestador/impacto")
+def prestador_impacto(competencia: str = Query(..., pattern=r"^\d{4}-\d{2}$"), top: int = 10):
+    with con_ro() as c:
+        conta_map = ensure_cols_or_400(
+            c,
+            "conta",
+            {
+                "data": ["dt_mes_competencia", "dt_competencia", "competencia", "dt_apresentada", "dt_conta"],
+                "valor": ["vl_liberado"],
+                # tentamos várias chaves de prestador
+                "prest": ["id_prestador_pagamento", "id_prestador_envio", "id_prestador"],
+            },
+        )
+        prest_cols = table_cols(c, "prestador")
+        nm_col = first_present(prest_cols, ["nm_prestador", "nome", "nm_razao", "ds_prestador"]) or "nm_prestador"
+        # caso não exista, criaremos um nome genérico no SELECT
+
+        mes_conta = month_sql(conta_map["data"])
+        sql = f"""
+            SELECT 
+              c.{conta_map['prest']} AS id_prestador,
+              COALESCE(p.{nm_col}, 'Prestador ' || CAST(c.{conta_map['prest']} AS VARCHAR)) AS nome,
+              SUM(c.{conta_map['valor']})::DOUBLE AS score
+            FROM conta c
+            LEFT JOIN prestador p ON p.id_prestador = c.{conta_map['prest']}
+            WHERE {mes_conta} = ?
+            GROUP BY 1,2
+            ORDER BY score DESC
+            LIMIT ?
+        """
+        rows = c.execute(sql, [competencia, top]).fetchall()
+        return {"competencia": competencia, "top": [{"id_prestador": r[0], "nome": r[1], "score": r[2]} for r in rows]}
+
+@app.get("/kpi/prestador/top")
+def prestador_top(competencia: str = Query(..., pattern=r"^\d{4}-\d{2}$"), limite: int = 10):
+    # alias para compatibilidade
+    return prestador_impacto(competencia, limite)
+
+# ----------------- UTILIZAÇÃO (resumo simples) ----------------
+@app.get("/kpi/utilizacao/resumo")
+def utilizacao_resumo(
     competencia: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
     produto: Optional[str] = None,
     uf: Optional[str] = None,
@@ -251,92 +293,38 @@ def kpi_utilizacao_resumo(
     sexo: Optional[str] = None,
     faixa: Optional[str] = None,
 ):
-    con = connect()
+    """
+    Resumo minimalista para já funcionar:
+      - beneficiarios_base: total em 'beneficiario'
+      - beneficiarios_utilizados: distintos em 'autorizacao' no mês
+      - autorizacoes: total em 'autorizacao' no mês
 
-    ben_id = find_col(con, "beneficiario", ["id_beneficiario", "cd_beneficiario"])
-    ben_uf = find_col(con, "beneficiario", ["uf", "ds_uf", "sg_uf"])
-    ben_cidade = find_col(con, "beneficiario", ["cidade", "nm_cidade", "ds_municipio"])
-    ben_sexo = find_col(con, "beneficiario", ["sexo", "ds_sexo", "cd_sexo"])
-    ben_nasc = find_col(con, "beneficiario", ["dt_nascimento", "nascimento"])
-    ben_prod_id = find_col(con, "beneficiario", ["id_produto", "cd_plano", "id_plano"])
-    ben_prod_nm = find_col(con, "beneficiario", ["ds_produto", "ds_plano", "nome_plano"])
-
-    aut_ben = find_col(con, "autorizacao", ["id_beneficiario", "cd_beneficiario"])
-    aut_dt  = find_col(con, "autorizacao", ["dt_autorizacao", "dt_solicitacao"])
-
-    if not ben_id:
-        raise HTTPException(400, detail="Não encontrei identificador em 'beneficiario'.")
-
-    where_b = []
-    if uf and ben_uf:
-        where_b.append(f"{ben_uf} IN (SELECT TRIM(x) FROM string_split($uf_csv, ','))")
-    if cidade and ben_cidade:
-        where_b.append(f"{ben_cidade} IN (SELECT TRIM(x) FROM string_split($cid_csv, ','))")
-    if sexo and ben_sexo:
-        where_b.append(f"upper({ben_sexo}) = upper($sexo)")
-    if produto and (ben_prod_id or ben_prod_nm):
-        conds = []
-        if ben_prod_id:
-            conds.append(f"CAST({ben_prod_id} AS VARCHAR) = $produto OR {ben_prod_id} IN (SELECT TRIM(x) FROM string_split($produto, ','))")
-        if ben_prod_nm:
-            conds.append(f"upper({ben_prod_nm}) LIKE upper('%' || $produto || '%')")
-        where_b.append("(" + " OR ".join(conds) + ")")
-
-    if faixa and ben_nasc:
-        parts = [p.strip() for p in faixa.split(",")]
-        age = f"(EXTRACT('year' FROM current_date) - EXTRACT('year' FROM TRY_CAST({ben_nasc} AS DATE)))"
-        ors = []
-        for p in parts:
-            m = re.match(r"(\d+)\s*-\s*(\d+)", p)
-            m2 = re.match(r"(\d+)\s*\+$", p)
-            if m:
-                a, b = int(m.group(1)), int(m.group(2))
-                ors.append(f"({age} BETWEEN {a} AND {b})")
-            elif m2:
-                a = int(m2.group(1))
-                ors.append(f"({age} >= {a})")
-        if ors:
-            where_b.append("(" + " OR ".join(ors) + ")")
-
-    where_b_sql = " AND ".join(where_b) if where_b else "TRUE"
-
-    base = con.execute(
-        f"SELECT COUNT(DISTINCT {ben_id}) FROM beneficiario WHERE {where_b_sql}",
-        {"uf_csv": uf or "", "cid_csv": cidade or "", "sexo": sexo or "", "produto": produto or ""},
-    ).fetchone()[0]
-
-    utilizados = 0
-    autorizacoes = 0
-    if aut_ben and aut_dt:
-        con.execute(
-            "CREATE TEMP TABLE tmp_ben AS "
-            f"SELECT DISTINCT {ben_id} AS id FROM beneficiario WHERE {where_b_sql}",
-            {"uf_csv": uf or "", "cid_csv": cidade or "", "sexo": sexo or "", "produto": produto or ""},
+    (Filtros opcionais estão reservados para a próxima iteração,
+     porque dependem do mapeamento exato de colunas no seu CSV.)
+    """
+    with con_ro() as c:
+        # Coluna de data na autorizacao
+        aut_map = ensure_cols_or_400(
+            c,
+            "autorizacao",
+            {"data": ["dt_autorizacao", "dt_entrada", "dt_solicitacao", "dt_guia"]},
         )
-        r = con.execute(
-            f"""
-            SELECT COUNT(DISTINCT a.{aut_ben}) AS usados, COUNT(*) AS total_aut
-            FROM autorizacao a
-            JOIN tmp_ben b ON b.id = a.{aut_ben}
-            WHERE {month_predicate(aut_dt)}
-            """,
-            {"comp": competencia},
-        ).fetchone()
-        if r:
-            utilizados = int(r[0] or 0)
-            autorizacoes = int(r[1] or 0)
-        con.execute("DROP TABLE IF EXISTS tmp_ben")
+        mes_aut = month_sql(aut_map["data"])
 
-    return {
-        "competencia": competencia,
-        "beneficiarios_base": int(base or 0),
-        "beneficiarios_utilizados": int(utilizados or 0),
-        "autorizacoes": int(autorizacoes or 0),
-        "filtros_aplicados": {
-            **({"uf": uf} if uf else {}),
-            **({"cidade": cidade} if cidade else {}),
-            **({"sexo": sexo} if sexo else {}),
-            **({"produto": produto} if produto else {}),
-            **({"faixa": faixa} if faixa else {}),
-        },
-    }
+        beneficiarios_base = c.execute("SELECT COUNT(*)::BIGINT FROM beneficiario").fetchone()[0]
+        beneficiarios_utilizados = c.execute(
+            f"SELECT COUNT(DISTINCT id_beneficiario)::BIGINT FROM autorizacao WHERE {mes_aut} = ?",
+            [competencia],
+        ).fetchone()[0]
+        autorizacoes = c.execute(
+            f"SELECT COUNT(*)::BIGINT FROM autorizacao WHERE {mes_aut} = ?",
+            [competencia],
+        ).fetchone()[0]
+
+        return {
+            "competencia": competencia,
+            "beneficiarios_base": int(beneficiarios_base),
+            "beneficiarios_utilizados": int(beneficiarios_utilizados),
+            "autorizacoes": int(autorizacoes),
+            "filtros_aplicados": {},  # preenchermos quando ativarmos filtros
+        }
